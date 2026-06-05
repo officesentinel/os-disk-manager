@@ -1,0 +1,23 @@
+# Build artifacts
+.build/
+.swiftpm/
+*.xcodeproj/
+DerivedData/
+
+# macOS
+.DS_Store
+
+# App bundles + generated icons
+*.app/
+AppIcon.icns
+AppIcon.iconset/
+
+# Test/coverage
+coverage.lcov
+*.xcresult
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
