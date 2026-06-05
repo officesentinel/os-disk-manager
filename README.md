@@ -64,7 +64,7 @@ Engine modules (`Sources/diskwipe-engine/`):
 
 | | |
 |---|---|
-| **Architecture** | Apple Silicon (M1 / M2 / M3 / M4 / M5). Intel Mac requires a universal build (planned) |
+| **Architecture** | Apple Silicon (M1 / M2 / M3 / M4 / M5) **only**. Intel Mac is intentionally not supported. |
 | **macOS** | 14 (Sonoma) or later |
 | **Dependencies** | Homebrew + `smartmontools` + `e2fsprogs` |
 | **Permissions** | Full Disk Access for the app bundle; `sudoers` entry for the engine binary |
@@ -90,7 +90,7 @@ Privacy & Security on first launch.
 - **No code signing** — ad-hoc only; Gatekeeper will prompt on first launch.
 - **No tests** — entire 6 360-LoC codebase has zero `XCTest` files. Regressions
   are caught by hand.
-- **arm64 only** — no Intel slice.
+- **Apple Silicon only** — arm64-only by design; Intel is not a target. M1 / M2 / M3 / M4 / M5 covered.
 - **macOS-only** — no Linux/Windows port (engine logic could be ported, GUI is
   SwiftUI).
 

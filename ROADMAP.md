@@ -60,9 +60,10 @@ Polling remains as fallback only if DA unavailable.
 
 ---
 
-## Phase 2 — Tests + universal binary (1.5 weeks)
+## Phase 2 — Tests + CI (~3 days)
 
-Stop regressions, broaden hardware coverage.
+Stop regressions. Apple Silicon is the only build target — no universal binary
+work, no Intel Homebrew path juggling.
 
 ### P2.1 XCTest skeleton + critical paths ⏱ 2 ⭐
 **Why:** 6 360 LoC with zero tests guarantees regressions on every refactor.
@@ -78,28 +79,19 @@ historically hit:
   - `Capabilities.compute` (NTFS read-only, ExFAT resize blocked, APFS allows everything)
 **Done when:** `swift test` runs, ≥ 60 % line coverage on engine modules.
 
-### P2.2 Universal arm64+x86_64 binary ⏱ 1 ⭐
-**Why:** today's build is arm64-only — locks out every Intel Mac.
-**Work:** `swift build -c release --arch arm64 --arch x86_64`, `lipo -create`
-to fat binary. `bundle.sh` adjusted. Verify on a real Intel machine (or via
-Rosetta-disabled VM).
-**Done when:** `lipo -info DiskWipe.app/Contents/MacOS/DiskWipe` shows both
-slices; app launches on Intel.
-
-### P2.3 Homebrew path detection for Intel ⏱ 0.5
-**Why:** hard-coded `/opt/homebrew` paths break on Intel installs (`/usr/local`).
-**Work:** central `Tools` helper resolves `smartctl`, `mke2fs`, etc. via
-`uname -m` or actual file existence at both locations. Falls back with a clear
-error if missing.
-**Done when:** running engine on Intel Homebrew install actually finds tools.
-
-### P2.4 CI on GitHub Actions ⏱ 1 ⭐
-**Why:** every PR should at least build + test before merge.
-**Work:** `.github/workflows/ci.yml` with macos-14 + macos-15 runners. Steps:
-brew install deps, swift build, swift test, lint, bundle check.
+### P2.2 CI on GitHub Actions ⏱ 1 ⭐
+**Why:** every PR should at least build + test before merge. Apple Silicon only —
+runners must be `macos-14-arm64` or `macos-15-arm64`.
+**Work:** `.github/workflows/ci.yml` with arm64 runners. Steps:
+`brew install smartmontools e2fsprogs`, `swift build`, `swift test`, lint.
 **Done when:** PRs show green / red status checks.
 
-**Phase 2 total: ~1.5 weeks.**
+**Phase 2 total: ~3 days.**
+
+> Intel Mac is **deliberately not a target** — there are no Phase 2 items to
+> add Intel support. The build script and `Tools` helper assume Apple Silicon
+> Homebrew at `/opt/homebrew`. If a contributor sends a PR to add Intel
+> support, the answer is: out of scope.
 
 ---
 
@@ -217,11 +209,13 @@ dashboard for ops.
 
 ## Out of scope (deliberately)
 
-- iPad / iOS port — disk access permissions don't exist on those platforms.
-- Windows port — completely different APIs; would be a separate codebase.
-- Block-level data recovery — wrong tool category.
-- Cloud sync of history — privacy concern; users can sync `~/disk-reports` via
-  iCloud Drive themselves.
+- **Intel Mac support** — Apple Silicon (M1-M5) is the only target. No
+  universal binary, no Rosetta testing, no `/usr/local`-based Homebrew paths.
+- **iPad / iOS** — disk-access permissions don't exist on those platforms.
+- **Windows** — completely different APIs; would be a separate codebase.
+- **Block-level data recovery** — wrong tool category.
+- **Cloud sync of history** — privacy concern; users can sync `~/disk-reports`
+  via iCloud Drive themselves.
 
 ---
 
@@ -230,12 +224,15 @@ dashboard for ops.
 | Phase | Effort | Cumulative state |
 |---|---|---|
 | 1 — Stop the bleeding | ~5 days | Safe for personal use of a colleague |
-| 2 — Tests + universal | ~7 days | Hardware-broadly compatible, no regressions |
-| 3 — Production security | ~10 days | Publicly distributable |
+| 2 — Tests + CI | ~3 days | Apple Silicon coverage, regressions caught |
+| 3 — Production security | ~10 days | Publicly distributable to Apple Silicon Macs |
 | 4 — Distribution + polish | ~5 days | First public alpha |
-| 5 — Cross-platform / advanced | open | OfficeSentinel-wide deployment |
+| 5 — Advanced (Linux engine / NVMe) | open | OfficeSentinel-wide deployment |
 
-**Phases 1–4 ≈ one calendar month of focused work.**
+**Phases 1–4 ≈ ~23 working days of focused work.**
+
+> Scope reminder: Apple Silicon (M1 / M2 / M3 / M4 / M5) only. Intel Mac and
+> Mac App Store sandbox are both intentionally out of scope.
 
 ---
 

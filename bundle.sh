@@ -1,7 +1,16 @@
 #!/bin/bash
 # Build release binaries and assemble DiskWipe.app (no Xcode required).
+#
+# Scope: Apple Silicon (M1 / M2 / M3 / M4 / M5) only. Intel Mac is not a target.
+# The build refuses to proceed on x86_64 to make this contract explicit.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+if [ "$(uname -m)" != "arm64" ]; then
+  echo "==> ERROR: OS Disk Manager targets Apple Silicon only (M1-M5)."
+  echo "    This host reports uname -m = $(uname -m). Aborting."
+  exit 1
+fi
 
 APP="DiskWipe.app"
 ID="org.officesentinel.diskwipe"
