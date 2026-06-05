@@ -16,6 +16,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Select newest available Xcode 16 (Swift 6 toolchain)
+        # macos-14 default toolchain is Swift 5.10; Package.swift declares
+        # swift-tools-version: 6.0, so we must point xcode-select at an Xcode 16.
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_16* 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "::error::Xcode 16 not present on runner. Available:"
+            ls /Applications | grep -i xcode
+            exit 1
+          fi
+          echo "Selecting $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+
       - name: Identify toolchain
         run: |
           sw_vers
