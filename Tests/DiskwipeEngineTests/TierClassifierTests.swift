@@ -86,21 +86,42 @@ final class TierClassifierTests: XCTestCase {
 
     func testIronwolfProVsPlainIronwolf() {
         // The classifier deliberately distinguishes "ironwolf pro" (enterprise)
-        // from "ironwolf " (consumer) via a trailing space.
+        // from "ironwolf " (with trailing space, consumer) — the trailing
+        // space prevents "ironwolf" alone from matching the "pro" variant.
+        // Smartctl's model_family for these drives looks like
+        // "Seagate IronWolf" / "Seagate IronWolf Pro"; the GUI passes that
+        // back as `model` when no model_name is available.
         let pro = TierClassifier.classify(
-            model: "ST10000NE0008-2JM101 (IronWolf Pro)",
+            model: "Seagate IronWolf Pro 10TB",
             proto: "SATA",
             formFactor: "3.5 inches",
             sizeBytes: 10_000_000_000_000
         )
-        XCTAssertEqual(pro.tier, .enterprise, "IronWolf Pro should be enterprise")
+        XCTAssertEqual(pro.tier, .enterprise, "IronWolf Pro should be enterprise — reason: \(pro.reason)")
 
         let plain = TierClassifier.classify(
-            model: "ST4000VN006 (IronWolf)",
+            model: "Seagate IronWolf 4TB",
             proto: "SATA",
             formFactor: "3.5 inches",
             sizeBytes: 4_000_000_000_000
         )
-        XCTAssertEqual(plain.tier, .consumer, "plain IronWolf should be consumer")
+        XCTAssertEqual(plain.tier, .consumer, "plain IronWolf should be consumer — reason: \(plain.reason)")
+    }
+
+    func testIronwolfWithoutTrailingDistinguisherIsUnknown() {
+        // A real Seagate model_name like "ST4000VN006" without the family
+        // string carries no heuristic signal — it must come out as .unknown
+        // unless the DB has an entry. This guards against false positives
+        // from over-eager substring matching.
+        let r = TierClassifier.classify(
+            model: "ST4000VN006",
+            proto: "SATA",
+            formFactor: "3.5 inches",
+            sizeBytes: 4_000_000_000_000
+        )
+        // Either .unknown (no DB hit) or a DB-driven verdict — never silently
+        // misclassified by a stale substring match.
+        XCTAssertNotEqual(r.tier, .enterprise,
+            "raw Seagate model code without family must not be flagged enterprise — reason: \(r.reason)")
     }
 }
