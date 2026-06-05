@@ -6,7 +6,47 @@ and a rough effort estimate. Phases are ordered by ROI — finishing Phase 1 alo
 already changes the security and reliability story significantly.
 
 Legend: ⏱ = effort in working days · 🔥 = blocker for public release · ⭐ = high
-user-visible value.
+user-visible value · ✅ done · ◐ scaffolded (gated on Owner-side action).
+
+## Current status (2026-06-05)
+
+**Phases 1, 2, 3, 4 — all delivered as far as Owner-action is not required.**
+
+  - **Phase 1** (Stop the bleeding) — ✅ five items + one QA round of three
+    hardening fixes (timeout watchdog, Reporter error surfacing, DA debounce).
+  - **Phase 2** (Tests + CI) — ✅ XCTest target with 27 cases on three pure
+    functions, green CI on macos-14 Apple Silicon (Xcode 16 / Swift 6.0.3),
+    53-second end-to-end run. Coverage extension parked for P2.1b.
+  - **Phase 3** (Production security) — entitlements + sign + notarize ready,
+    XPC + Developer-ID checklists written. Gated on Owner enrolling in the
+    Apple Developer Program ($99/yr) — once TEAM_ID is set, the pipeline
+    flips from ad-hoc to Developer-ID automatically. One QA round fixed a
+    pid-based TOCTOU in the XPC validation recipe (now audit-token), a
+    meaningless `application-identifier` entitlement, an underprivileged
+    snapshot/scan auth tier (now session-scoped), and added a Mach-O
+    preflight to notarize.sh so we don't waste 30 minutes per round-trip.
+  - **Phase 4** (Distribution + polish) — DMG builder + a11y first pass
+    landed; Sparkle + crash-reporter design docs in place. One QA round
+    fixed a notarize↔DMG handoff bug, added a CI step to smoke-test the
+    DMG pipeline, and hardened the version string parser against
+    PlistBuddy trailing-whitespace edge cases.
+
+**What's gated on Owner action:**
+  1. Apple Developer Program enrollment + Developer ID Application
+     certificate ([docs/DEVELOPER_ID_SETUP.md](docs/DEVELOPER_ID_SETUP.md))
+  2. App Store Connect API .p8 key for notarytool
+  3. EdDSA keypair for Sparkle appcast signing
+  4. GitHub Pages site for the appcast URL
+  5. Crash-report intake endpoint at crashes.officesentinel.org
+
+**What remains for engineers (not Owner-gated):**
+  - **P2.1b** — fixture-driven tests for Smart.fullReport, Partitions.layout,
+    DiskDatabase.match (needs captured smartctl-json / diskutil-plist payloads)
+  - **P3.2 implementation** — turn the XPC design doc into Swift code
+    (3-5 days of focused work, gated on TEAM_ID for the code-requirement string)
+  - **P4.5b** — remaining 44 accessibility items from the audit
+    (Dashboard 12, PartitionView 15, ScanView 8, HistoryView 6, ContentView 3)
+  - **Phase 5** — Linux/Ubuntu engine port (open-ended).
 
 ---
 

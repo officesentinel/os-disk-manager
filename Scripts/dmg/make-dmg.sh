@@ -29,8 +29,17 @@ if [ ! -d "$APP_PATH" ]; then
 fi
 
 # Pull version from Info.plist so the DMG name always tracks the release.
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
-            "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo "0.0")"
+# Strip whitespace / newlines defensively — PlistBuddy occasionally appends
+# a trailing newline; volname truncates at the first NL and the DMG
+# filename then carries a literal \n which is annoying to handle.
+VERSION_RAW="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+                "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo "0.0")"
+VERSION="$(printf '%s' "$VERSION_RAW" | tr -d '[:space:]')"
+# Sanitise: keep only safe filename / volname characters.
+if ! [[ "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "==> ERROR: refusing to use unsafe version string: '$VERSION_RAW'"
+    exit 1
+fi
 DMG_NAME="DiskWipe-${VERSION}-arm64.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
 
@@ -72,5 +81,10 @@ fi
 ls -lh "$DMG_PATH"
 echo
 echo "==> Done: $DMG_PATH"
-echo "    Next: ./Scripts/notarize/notarize.sh with APP_PATH=$DMG_PATH"
-echo "          (notarytool accepts both .app and .dmg; staple after success)"
+echo
+echo "    Next step in the release pipeline:"
+echo "      APP_PATH=\"$DMG_PATH\" ./Scripts/notarize/notarize.sh"
+echo
+echo "    notarize.sh accepts either .app or .dmg as APP_PATH; for a .dmg"
+echo "    the per-Mach-O preflight is skipped (the inner .app is opaque"
+echo "    until mount) so the inner .app must already have been signed."

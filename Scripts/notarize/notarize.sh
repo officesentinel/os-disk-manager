@@ -31,8 +31,15 @@ if [ -z "${AC_API_KEY_ID:-}" ] || [ -z "${AC_API_ISSUER_ID:-}" ] || [ -z "${AC_A
     echo "    Get keys at https://appstoreconnect.apple.com/access/integrations/api"
     exit 1
 fi
-if [ ! -d "$APP_PATH" ]; then
-    echo "==> ERROR: $APP_PATH does not exist."
+# Accept either a .app bundle (directory) or a .dmg (file).
+# notarytool handles both; the preflight bundle-walk only makes sense
+# for the .app form (the .dmg is opaque until mounted).
+if [ -d "$APP_PATH" ]; then
+    INPUT_KIND="app"
+elif [ -f "$APP_PATH" ] && [[ "$APP_PATH" =~ \.dmg$ ]]; then
+    INPUT_KIND="dmg"
+else
+    echo "==> ERROR: $APP_PATH must be a .app directory or a .dmg file."
     exit 1
 fi
 if [ ! -f "$AC_API_KEY_PATH" ]; then
@@ -40,15 +47,20 @@ if [ ! -f "$AC_API_KEY_PATH" ]; then
     exit 1
 fi
 
-# Pre-flight 1: bundle must be Developer-ID signed, not ad-hoc.
+# Pre-flight 1: target must be Developer-ID signed, not ad-hoc.
 if codesign -dv "$APP_PATH" 2>&1 | grep -q "Signature=adhoc"; then
     echo "==> ERROR: $APP_PATH is ad-hoc signed. Run sign.sh with TEAM_ID set first."
     exit 1
 fi
 
-# Pre-flight 2: every embedded Mach-O must be hardened-runtime signed.
-# Notary service rejects bundles with any unsigned or non-hardened binary
-# and we wait 5-30 minutes to discover that. Catch it now.
+# Pre-flight 2: bundle-walk only meaningful for .app form. For .dmg we
+# trust the inner .app was preflight-checked when it was notarised on its
+# own (the typical two-stage flow: notarise .app → build DMG → notarise
+# DMG → staple).
+if [ "$INPUT_KIND" != "app" ]; then
+    echo "==> Pre-flight: skipped (input is a .dmg — bundle-walk N/A)."
+    UNSIGNED=0
+else
 echo "==> Pre-flight: scanning bundle for unsigned / non-hardened Mach-Os…"
 UNSIGNED=0
 while IFS= read -r f; do
@@ -84,13 +96,21 @@ if [ "$UNSIGNED" -gt 0 ]; then
     exit 1
 fi
 echo "==> Pre-flight clean. Proceeding to submission."
+fi   # end of "input is .app" branch
 
 STAGING_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGING_DIR"' EXIT
-ZIP_PATH="$STAGING_DIR/DiskWipe.zip"
 
-echo "==> Zipping bundle for upload: $ZIP_PATH"
-/usr/bin/ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
+# For .app input we zip; for .dmg we submit the file directly.
+if [ "$INPUT_KIND" = "app" ]; then
+    UPLOAD_PATH="$STAGING_DIR/DiskWipe.zip"
+    echo "==> Zipping bundle for upload: $UPLOAD_PATH"
+    /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$UPLOAD_PATH"
+else
+    UPLOAD_PATH="$APP_PATH"
+    echo "==> Submitting .dmg directly: $UPLOAD_PATH"
+fi
+ZIP_PATH="$UPLOAD_PATH"   # legacy name used below
 
 echo "==> Submitting to Apple notary service (this can take 5-30 minutes)…"
 SUBMIT_OUT="$(xcrun notarytool submit "$ZIP_PATH" \
