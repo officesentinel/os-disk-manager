@@ -105,42 +105,58 @@ Also asserts `bundle.sh` has its arm64 hard-fail guard intact.
 Eliminate the NOPASSWD sudoers blanket grant. This is the hardest blocker for
 public distribution.
 
-### P3.1 Apple Developer ID enrolment 🔥
+### P3.1 Apple Developer ID enrolment 🔥  ✅ checklist ready
 **Why:** required for code signing, notarization, GateKeeper compliance.
 Without it ad-hoc only — users see "developer cannot be verified" on every
 launch, can't auto-update.
 **Work:** $99/year Apple Developer Program; create a Developer ID Application
 certificate; install in Keychain.
-**Done when:** `codesign -dv` shows the Team ID.
+**Done:** Owner-actionable checklist at [docs/DEVELOPER_ID_SETUP.md](docs/DEVELOPER_ID_SETUP.md)
+covering enrollment, certificate generation, App Store Connect API key
+setup, secrets file layout, and CI wiring. Cannot complete without Owner
+running the steps; build pipeline auto-detects TEAM_ID and switches from
+ad-hoc to Developer ID signing.
+**Done when (Owner side):** `codesign -dv` shows the Team ID.
 
-### P3.2 SMAppService privileged helper ⏱ 5 🔥
+### P3.2 SMAppService privileged helper ⏱ 5 🔥  ◐ design doc ready
 **Why:** replace blanket `NOPASSWD: /usr/local/bin/diskwipe-engine` with a
 properly authorised helper. Each dangerous action (wipe, repartition) prompts
 for biometric/password via macOS Authorization Services.
-**Work:**
-  - New target `DiskWipeHelper.app` containing the engine.
-  - `Contents/Library/LaunchDaemons/<bundle-id>.plist` for daemon registration.
-  - XPC protocol for `list`, `smart`, `snapshot`, `run`, `scan`, …
-  - Main app calls XPC; helper validates caller code requirement.
-  - Bootstrap via `SMAppService.daemon(...)`.
-  - Authorization rules per command (`com.officesentinel.disk-manager.run` etc.)
-  - Migration script that removes `/etc/sudoers.d/disk-verify` on first launch.
+**Done:** Full design specification at [docs/XPC_HELPER_DESIGN.md](docs/XPC_HELPER_DESIGN.md):
+mach service name, full XPC protocol surface (DiskWipeHelperXPC), all
+Authorization right names + prompt labels, code-requirement validation
+recipe, migration plan for the legacy sudoers entry, LaunchDaemons plist
+layout, open questions (TCC / FDA for helper). Implementation gated by
+P3.1 — requires Team ID at build time. Once Owner finishes P3.1, this
+becomes a 3-5 day Swift implementation slot against the spec.
 **Done when:** sudoers no longer required; each `run`/`repartition` triggers
 biometric prompt; helper passes Apple notarization.
 
-### P3.3 Notarization pipeline ⏱ 1 🔥
+### P3.3 Notarization pipeline ⏱ 1 🔥  ✅ scripts ready
 **Why:** macOS won't launch unsigned/non-notarized apps from the internet without
 a clear nag.
-**Work:** `xcrun notarytool submit` step in CI. Apple ID API key in GitHub
-Secrets. Stapler attaches the ticket to the .app and DMG.
+**Done:** Two scripts at `Scripts/notarize/`:
+  - `sign.sh` — hardened-runtime codesign of helper + engine + outer .app,
+    with entitlement attachment. Auto-falls-back to ad-hoc when TEAM_ID is
+    not set (local dev). Verified working in ad-hoc mode on Apple Silicon.
+  - `notarize.sh` — `xcrun notarytool submit --wait`, polls until terminal
+    state, surfaces the notary log on failure, staples + validates on
+    success. Uses App Store Connect API key (.p8) for auth.
+Both gated by P3.1 (need Team ID + API key). CI release.yml integration
+deferred until first successful local run by Owner.
 **Done when:** clean Mac (downloaded fresh DMG) opens app without warning.
 
-### P3.4 Hardened runtime + entitlements ⏱ 0.5
+### P3.4 Hardened runtime + entitlements ⏱ 0.5  ✅
 **Why:** required for notarization. Plus reduces blast radius if exploited.
-**Work:** entitlements plist with `com.apple.security.app-sandbox = false`
-(sandboxing makes raw disk access impossible, so unfortunately we stay
-unsandboxed), but enable hardened runtime + minimum required entitlements
-(file-system temp, device extension).
+**Done:** Two entitlement plists in `Resources/Entitlements/`:
+  - `DiskWipeApp.entitlements` — app sandbox OFF (raw disk access requires
+    it), hardened-runtime exemptions explicitly DISABLED (no JIT, no
+    unsigned executable memory, no library-validation bypass, no debugger,
+    no dyld env vars), mach-lookup whitelist for the helper service,
+    user-selected file r/w for report export.
+  - `DiskWipeHelper.entitlements` — daemon entitlements with explicit
+    application-identifier, hardened-runtime locked down. Code-requirement
+    string template (Team ID patched in by sign.sh).
 **Done when:** `codesign --display --entitlements` shows the locked-down set.
 
 **Phase 3 total: ~2 weeks. Phase 3 → app can be safely shared with users.**

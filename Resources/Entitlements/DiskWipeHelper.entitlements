@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        ==================================================================
+        DiskWipeHelper — SMAppService privileged daemon entitlements
+        ==================================================================
+        The helper is the ONLY component that runs as root. It exposes an
+        XPC interface to the GUI; every command is authorised through
+        macOS Authorization Services (Touch ID / password). NOPASSWD
+        sudoers grant is deleted on first launch of v1.0.
+    -->
+
+    <!-- Required for any privileged helper executed by launchd as root. -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!--
+        Code-requirement string that the GUI must satisfy when connecting
+        via XPC. Filled in at build time by Scripts/notarize/sign.sh once
+        the Developer ID Team ID is known. Without this the helper would
+        accept connections from any process — fatal flaw.
+
+        Template: identifier "org.officesentinel.disk-manager"
+                  and anchor apple generic
+                  and certificate leaf[subject.OU] = "<TEAM_ID>"
+    -->
+    <key>com.apple.security.application-identifier</key>
+    <string>org.officesentinel.disk-manager.helper</string>
+
+    <!-- Hardened-runtime hardening. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <false/>
+    <key>com.apple.security.cs.disable-executable-page-protection</key>
+    <false/>
+</dict>
+</plist>

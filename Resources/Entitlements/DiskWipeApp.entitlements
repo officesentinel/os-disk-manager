@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        ==================================================================
+        OS Disk Manager — main GUI entitlements (hardened runtime)
+        ==================================================================
+        Notarization requires hardened runtime + a minimal entitlement set.
+        We deliberately do NOT enable App Sandbox: raw access to /dev/diskN
+        is impossible from within the sandbox, which is the entire reason
+        this app exists. Instead, we run unsandboxed-but-hardened and
+        delegate every privileged action to the SMAppService daemon
+        (Phase 3.2) so the GUI itself stays read-only.
+    -->
+
+    <!-- App Sandbox: DISABLED (incompatible with raw disk access). -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Allow the GUI to launch & talk to the SMAppService helper. -->
+    <key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+    <array>
+        <string>org.officesentinel.disk-manager.helper</string>
+    </array>
+
+    <!--
+        File-system temp + Downloads access for report export ("Save report
+        to…" dialog lands wherever the user chooses; reports default to
+        ~/disk-reports). With hardened runtime + no sandbox these aren't
+        strictly enforced, but listing them documents intent and survives
+        a future re-sandboxing.
+    -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!--
+        Disable hardened-runtime exemptions we don't need. Each `false`
+        here is a small attack-surface reduction.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+    <key>com.apple.security.cs.disable-executable-page-protection</key>
+    <false/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <false/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <false/>
+    <key>com.apple.security.cs.debugger</key>
+    <false/>
+</dict>
+</plist>
