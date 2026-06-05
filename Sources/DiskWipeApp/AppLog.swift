@@ -44,11 +44,26 @@ final class AppLog: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let data = line.data(using: .utf8) else { return }
         let p = path
+        rotateIfNeeded(p)
         if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: p)) {
             defer { try? fh.close() }
             try? fh.seekToEnd()
             try? fh.write(contentsOf: data)
         }
+    }
+
+    /// Rotate when current log exceeds 5 MB. Keeps 3 generations.
+    private static let maxFileBytes: Int = 5 * 1024 * 1024
+    private func rotateIfNeeded(_ path: String) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attrs[.size] as? NSNumber)?.intValue,
+              size > Self.maxFileBytes else { return }
+        let fm = FileManager.default
+        try? fm.removeItem(atPath: "\(path).3")
+        try? fm.moveItem(atPath: "\(path).2", toPath: "\(path).3")
+        try? fm.moveItem(atPath: "\(path).1", toPath: "\(path).2")
+        try? fm.moveItem(atPath: path, toPath: "\(path).1")
+        fm.createFile(atPath: path, contents: Data())
     }
 
     /// Read recent lines from today's GUI log + engine log, sorted by timestamp.

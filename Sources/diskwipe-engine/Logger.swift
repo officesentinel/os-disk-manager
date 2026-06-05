@@ -47,11 +47,40 @@ enum Logger {
         let line = "[\(timeFmt.string(from: Date()))] [\(level)] [\(source)] \(msg)\n"
         lock.lock(); defer { lock.unlock() }
         let path = logPath()
+        rotateIfNeeded(path)
         guard let data = line.data(using: .utf8) else { return }
         if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) {
             defer { try? fh.close() }
             try? fh.seekToEnd()
             try? fh.write(contentsOf: data)
         }
+    }
+
+    /// Maximum size of a single log file before rotation (5 MB).
+    /// Keep 3 generations: .log, .log.1, .log.2. Older are deleted.
+    private static let maxFileBytes: Int = 5 * 1024 * 1024
+    private static let keepGenerations = 3
+
+    private static func rotateIfNeeded(_ path: String) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attrs[.size] as? NSNumber)?.intValue,
+              size > maxFileBytes else { return }
+        let fm = FileManager.default
+        // Shift: .2 → delete, .1 → .2, current → .1
+        for gen in stride(from: keepGenerations - 1, through: 1, by: -1) {
+            let src = "\(path).\(gen)"
+            let dst = "\(path).\(gen + 1)"
+            if gen + 1 > keepGenerations - 1 {
+                try? fm.removeItem(atPath: src)
+            } else {
+                try? fm.removeItem(atPath: dst)
+                try? fm.moveItem(atPath: src, toPath: dst)
+            }
+        }
+        try? fm.moveItem(atPath: path, toPath: "\(path).1")
+        Paths.chownToUser("\(path).1")
+        // New empty file will be created on first FileHandle write attempt next call.
+        fm.createFile(atPath: path, contents: Data())
+        Paths.chownToUser(path)
     }
 }
