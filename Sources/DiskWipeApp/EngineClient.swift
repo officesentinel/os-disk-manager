@@ -27,6 +27,7 @@ final class EngineClient: @unchecked Sendable {
 
     /// Run engine with given args. If `sudo` is true, prepends `sudo -n`.
     /// Returns raw stdout `Data`, captured stderr, and exit code.
+    /// On timeout the engine is `terminate()`d and exit=-2 is returned (QA-fix).
     func runRaw(_ args: [String], sudo: Bool = false, timeout: TimeInterval = 60) -> (stdout: Data, stderr: Data, exit: Int32) {
         let p = Process()
         if sudo {
@@ -47,17 +48,31 @@ final class EngineClient: @unchecked Sendable {
             return (Data(), Data(), -1)
         }
 
+        // Timeout watchdog: terminates a deadlocked engine so that the
+        // subsequent readDataToEndOfFile unblocks via EOF on a closed pipe.
+        let watchdog = DispatchWorkItem { [weak p] in
+            guard let p, p.isRunning else { return }
+            AppLog.shared.warn("engine.client", "timeout after \(timeout)s — terminating engine args=\(args)")
+            p.terminate()
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
         // Read fully before waitUntilExit to avoid pipe-buffer deadlock on big outputs.
         let out = outPipe.fileHandleForReading.readDataToEndOfFile()
         let err = errPipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        watchdog.cancel()   // process is done, watchdog no longer needed
 
-        if p.terminationStatus != 0 {
+        // SIGTERM-killed process exits with status 15 — translate to a clear -2 sentinel.
+        let timedOut = !watchdog.isCancelled && p.terminationReason == .uncaughtSignal
+        let exit = timedOut ? Int32(-2) : p.terminationStatus
+
+        if exit != 0 {
             let errStr = String(data: err, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             AppLog.shared.warn("engine.client",
-                "non-zero exit \(p.terminationStatus) args=\(args) stderr=\(errStr.prefix(200))")
+                "non-zero exit \(exit) args=\(args) stderr=\(errStr.prefix(200))")
         }
-        return (out, err, p.terminationStatus)
+        return (out, err, exit)
     }
 
     /// Run engine and return the most recent valid JSON object on stdout.

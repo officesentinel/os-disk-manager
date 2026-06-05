@@ -20,6 +20,13 @@ final class DiskWatcher {
     private var callbacks: [UUID: () -> Void] = [:]
     private var safetyTimer: Timer?
 
+    /// Debounce window. `DARegisterDiskAppearedCallback` fires once per existing
+    /// disk at registration time, so on a Mac with 4 internal volumes + a USB
+    /// stick we receive 5 callbacks in <100 ms. The debouncer coalesces them
+    /// into a single `fireAll`. (QA-fix.)
+    private static let debounceInterval: TimeInterval = 0.15
+    private var debounceWorkItem: DispatchWorkItem?
+
     private init() {
         guard let s = DASessionCreate(kCFAllocatorDefault) else {
             AppLog.shared.error("diskwatcher", "DASessionCreate failed — falling back to polling only")
@@ -35,14 +42,14 @@ final class DiskWatcher {
         DARegisterDiskAppearedCallback(s, nil, { _, ctx in
             guard let ctx else { return }
             let watcher = Unmanaged<DiskWatcher>.fromOpaque(ctx).takeUnretainedValue()
-            Task { @MainActor in watcher.fireAll() }
+            Task { @MainActor in watcher.scheduleFire() }
         }, ctx)
 
         // Disk disappeared
         DARegisterDiskDisappearedCallback(s, nil, { _, ctx in
             guard let ctx else { return }
             let watcher = Unmanaged<DiskWatcher>.fromOpaque(ctx).takeUnretainedValue()
-            Task { @MainActor in watcher.fireAll() }
+            Task { @MainActor in watcher.scheduleFire() }
         }, ctx)
 
         AppLog.shared.info("diskwatcher", "DiskArbitration session running on main RunLoop")
@@ -65,11 +72,25 @@ final class DiskWatcher {
     }
 
     /// Manually trigger all registered callbacks (e.g. on app foregrounding).
+    /// Bypasses the debouncer — user-driven, not event-driven.
     func refresh() { fireAll() }
 
     // MARK: - private
 
+    /// Coalesce a burst of DA callbacks into one `fireAll` after `debounceInterval`.
+    private func scheduleFire() {
+        debounceWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in self?.fireAll() }
+        }
+        debounceWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.debounceInterval, execute: work)
+    }
+
     private func fireAll() {
+        // Copy under MainActor — callbacks dict mutates only on main, so this is
+        // race-free; the snapshot also guards against re-entrancy if a callback
+        // calls register/unregister inline.
         let cbs = Array(callbacks.values)
         cbs.forEach { $0() }
     }
