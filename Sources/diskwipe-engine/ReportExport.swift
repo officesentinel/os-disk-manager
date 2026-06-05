@@ -24,33 +24,53 @@ enum ReportExport {
         let wantJson = format == "json" || format == "all"
 
         var written: [String: Any] = [:]
+        var errors: [String] = []
+        // (P1.3): every write is checked; failures surface back to the GUI which
+        // shows a localised toast instead of silently pointing Finder at a
+        // non-existent file.
         if wantMd {
             let path = (dir as NSString).appendingPathComponent("\(serial).md")
-            try? markdown(smart: smart, layout: layout, when: stamp)
-                .write(toFile: path, atomically: true, encoding: .utf8)
-            Paths.chownToUser(path); written["md"] = path
+            do {
+                try markdown(smart: smart, layout: layout, when: stamp)
+                    .write(toFile: path, atomically: true, encoding: .utf8)
+                Paths.chownToUser(path); written["md"] = path
+            } catch {
+                Logger.error("export", "md write failed: \(error)")
+                errors.append("md: \(error.localizedDescription)")
+            }
         }
         if wantHtml {
             let path = (dir as NSString).appendingPathComponent("\(serial).html")
-            try? htmlReport(smart: smart, layout: layout, when: stamp)
-                .write(toFile: path, atomically: true, encoding: .utf8)
-            Paths.chownToUser(path); written["html"] = path
+            do {
+                try htmlReport(smart: smart, layout: layout, when: stamp)
+                    .write(toFile: path, atomically: true, encoding: .utf8)
+                Paths.chownToUser(path); written["html"] = path
+            } catch {
+                Logger.error("export", "html write failed: \(error)")
+                errors.append("html: \(error.localizedDescription)")
+            }
         }
         if wantJson {
             let path = (dir as NSString).appendingPathComponent("\(serial).json")
             let bundle: [String: Any] = [
-                "generatedAt": stamp,
-                "schema": "report.v2",
-                "smart": smart,
-                "partitions": layout
+                "generatedAt": stamp, "schema": "report.v2",
+                "smart": smart, "partitions": layout
             ]
-            if let data = try? JSONSerialization.data(withJSONObject: bundle,
-                                                     options: [.prettyPrinted, .sortedKeys]),
-               let s = String(data: data, encoding: .utf8) {
-                try? s.write(toFile: path, atomically: true, encoding: .utf8)
+            do {
+                let data = try JSONSerialization.data(withJSONObject: bundle,
+                                                     options: [.prettyPrinted, .sortedKeys])
+                guard let s = String(data: data, encoding: .utf8) else {
+                    throw NSError(domain: "ReportExport", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: "JSON encoding failed"])
+                }
+                try s.write(toFile: path, atomically: true, encoding: .utf8)
                 Paths.chownToUser(path); written["json"] = path
+            } catch {
+                Logger.error("export", "json write failed: \(error)")
+                errors.append("json: \(error.localizedDescription)")
             }
         }
+        if !errors.isEmpty { written["errors"] = errors }
         return written
     }
 

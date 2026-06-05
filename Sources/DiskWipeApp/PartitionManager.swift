@@ -31,7 +31,7 @@ struct PartItem: Identifiable, Hashable {
 final class PartitionManager: ObservableObject {
     @Published var disks: [DiskItem] = []
     @Published var selectedDisk: DiskItem? { didSet { if oldValue?.id != selectedDisk?.id { handleDiskChanged() } } }
-    private var pollTimer: Timer?
+    private var watcherId: UUID?
     @Published var scheme: String = "—"
     @Published var partitions: [PartItem] = []
     @Published var selectedPart: PartItem?
@@ -42,14 +42,10 @@ final class PartitionManager: ObservableObject {
     static let filesystems = ["APFS", "HFS+", "ExFAT", "FAT32", "ext4", "ext3", "ext2"]
     static let schemes = ["GPT", "MBR", "APM"]
 
-    private let enginePath: String = {
-        let c = ["/usr/local/bin/diskwipe-engine",
-                 (NSHomeDirectory() as NSString).appendingPathComponent("src/diskwipe/.build/debug/diskwipe-engine")]
-        return c.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/usr/local/bin/diskwipe-engine"
-    }()
+    private var enginePath: String { EngineClient.shared.enginePath }
 
     func refreshDisks() {
-        guard let arr = runJSONArray([enginePath, "list"], sudo: false) else { return }
+        guard let arr = EngineClient.shared.array(["list"]) else { return }
         disks = arr.map { d in
             DiskItem(id: d["id"] as? String ?? "?", model: d["model"] as? String ?? "?",
                      serial: d["serial"] as? String ?? "", sizeGB: d["sizeGB"] as? Double ?? 0,
@@ -72,19 +68,17 @@ final class PartitionManager: ObservableObject {
     }
 
     func startPolling() {
-        guard pollTimer == nil else { return }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, !self.busy else { return }
-                self.refreshDisks()
-            }
+        guard watcherId == nil else { return }
+        watcherId = DiskWatcher.shared.register { [weak self] in
+            guard let self, !self.busy else { return }
+            self.refreshDisks()
         }
     }
-    func stopPolling() { pollTimer?.invalidate(); pollTimer = nil }
+    func stopPolling() { DiskWatcher.shared.unregister(watcherId); watcherId = nil }
 
     func loadLayout() {
         guard let disk = selectedDisk else { partitions = []; return }
-        guard let obj = runJSONObject([enginePath, "partlist", "--disk", disk.id], sudo: false) else { return }
+        guard let obj = EngineClient.shared.object(["partlist", "--disk", disk.id]) else { return }
         scheme = obj["scheme"] as? String ?? "—"
         let raw = obj["partitions"] as? [[String: Any]] ?? []
         partitions = raw.map { p in
@@ -148,9 +142,9 @@ final class PartitionManager: ObservableObject {
     private func op(_ args: [String]) {
         guard !busy else { return }
         busy = true; lastResult = Loc.shared.t("status.running")
-        let full = [enginePath] + args
         Task.detached { [weak self] in
-            let r = self?.runJSONObjectSync(full, sudo: true)
+            let r = EngineClient.shared.object(args, sudo: true)
+            _ = self  // keep weak-self semantics
             await MainActor.run {
                 guard let self else { return }
                 if let r {
@@ -175,60 +169,5 @@ final class PartitionManager: ObservableObject {
         }
     }
 
-    // MARK: process helpers
-
-    private func runData(_ argv: [String], sudo: Bool) -> Data? {
-        let p = Process()
-        if sudo {
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-            p.arguments = ["-n"] + argv
-        } else {
-            p.executableURL = URL(fileURLWithPath: argv[0])
-            p.arguments = Array(argv.dropFirst())
-        }
-        let out = Pipe(); let err = Pipe()
-        p.standardOutput = out; p.standardError = err
-        do { try p.run() } catch { return nil }
-        let d = out.fileHandleForReading.readDataToEndOfFile()
-        _ = err.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return d
-    }
-
-    private func runJSONArray(_ argv: [String], sudo: Bool) -> [[String: Any]]? {
-        guard let d = runData(argv, sudo: sudo) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: d)) as? [[String: Any]]
-    }
-
-    private func runJSONObject(_ argv: [String], sudo: Bool) -> [String: Any]? {
-        guard let d = runData(argv, sudo: sudo) else { return nil }
-        // Engine may emit multiple JSON lines; take the last opresult/object line.
-        let text = String(data: d, encoding: .utf8) ?? ""
-        for line in text.split(separator: "\n").reversed() {
-            if let ld = line.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: ld) as? [String: Any] {
-                return obj
-            }
-        }
-        return nil
-    }
-
-    // nonisolated sync variant for background queue
-    nonisolated private func runJSONObjectSync(_ argv: [String], sudo: Bool) -> [String: Any]? {
-        let p = Process()
-        if sudo { p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo"); p.arguments = ["-n"] + argv }
-        else { p.executableURL = URL(fileURLWithPath: argv[0]); p.arguments = Array(argv.dropFirst()) }
-        let out = Pipe(); let err = Pipe()
-        p.standardOutput = out; p.standardError = err
-        do { try p.run() } catch { return nil }
-        let d = out.fileHandleForReading.readDataToEndOfFile()
-        _ = err.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        let text = String(data: d, encoding: .utf8) ?? ""
-        for line in text.split(separator: "\n").reversed() {
-            if let ld = line.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: ld) as? [String: Any] { return obj }
-        }
-        return nil
-    }
+    // (P1.2) Local process helpers removed — see EngineClient.
 }

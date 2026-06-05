@@ -45,18 +45,13 @@ final class HistoryManager: ObservableObject {
     @Published var compareSelection: [String] = []
     @Published var loading = false
 
-    private let enginePath: String = {
-        let c = ["/usr/local/bin/diskwipe-engine",
-                 (NSHomeDirectory() as NSString).appendingPathComponent("src/diskwipe/.build/debug/diskwipe-engine")]
-        return c.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/usr/local/bin/diskwipe-engine"
-    }()
+    private var enginePath: String { EngineClient.shared.enginePath }
 
     func refresh() {
         loading = true
-        let path = enginePath
         Task.detached { [weak self] in
             guard let self else { return }
-            let arr = Self.runArraySync(argv: [path, "history"]) ?? []
+            let arr = EngineClient.shared.array(["history"]) ?? []
             await MainActor.run {
                 self.disks = arr.map { Self.parseDisk($0) }
                 self.loading = false
@@ -73,10 +68,9 @@ final class HistoryManager: ObservableObject {
 
     func loadSnapshotsForSelected() {
         guard let serial = selectedDisk?.serial else { snapshots = []; fullSnapshot = nil; return }
-        let path = enginePath
         Task.detached { [weak self] in
             guard let self else { return }
-            let arr = Self.runArraySync(argv: [path, "history", "--serial", serial]) ?? []
+            let arr = EngineClient.shared.array(["history", "--serial", serial]) ?? []
             await MainActor.run {
                 self.snapshots = arr.map { Self.parseSnap($0) }
                 self.selectedSnapshot = self.snapshots.last
@@ -88,10 +82,9 @@ final class HistoryManager: ObservableObject {
 
     func loadFullSnapshot(path snapPath: String?) {
         guard let snapPath else { fullSnapshot = nil; return }
-        let engine = enginePath
         Task.detached { [weak self] in
             guard let self else { return }
-            let obj = Self.runObjectSync(argv: [engine, "history", "--path", snapPath])
+            let obj = EngineClient.shared.object(["history", "--path", snapPath])
             await MainActor.run { self.fullSnapshot = obj }
         }
     }
@@ -109,7 +102,7 @@ final class HistoryManager: ObservableObject {
     }
 
     func loadSnapshotByPath(_ path: String) -> [String: Any]? {
-        Self.runObjectSync(argv: [enginePath, "history", "--path", path])
+        EngineClient.shared.object(["history", "--path", path])
     }
 
     // MARK: parsing
@@ -148,26 +141,5 @@ final class HistoryManager: ObservableObject {
         )
     }
 
-    // MARK: process helpers
-
-    nonisolated private static func runDataSync(argv: [String]) -> Data? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: argv[0])
-        p.arguments = Array(argv.dropFirst())
-        let out = Pipe(); let err = Pipe()
-        p.standardOutput = out; p.standardError = err
-        do { try p.run() } catch { return nil }
-        let d = out.fileHandleForReading.readDataToEndOfFile()
-        _ = err.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return d
-    }
-    nonisolated private static func runArraySync(argv: [String]) -> [[String: Any]]? {
-        guard let d = runDataSync(argv: argv) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: d)) as? [[String: Any]]
-    }
-    nonisolated private static func runObjectSync(argv: [String]) -> [String: Any]? {
-        guard let d = runDataSync(argv: argv) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
-    }
+    // (P1.2) Local process helpers removed — see EngineClient.
 }

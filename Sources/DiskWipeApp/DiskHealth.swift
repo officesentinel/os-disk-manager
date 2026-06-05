@@ -51,7 +51,7 @@ struct SmartReport {
 final class DiskHealth: ObservableObject {
     @Published var disks: [DiskItem] = []
     @Published var selected: DiskItem? { didSet { if oldValue != selected { load() } } }
-    private var pollTimer: Timer?
+    private var watcherId: UUID?
     @Published var report: SmartReport?
     @Published var partitions: [PartItem] = []
     @Published var scheme = "—"
@@ -61,14 +61,11 @@ final class DiskHealth: ObservableObject {
     @Published var exporting = false
     @Published var exportMessage: String?
 
-    private let enginePath: String = {
-        let c = ["/usr/local/bin/diskwipe-engine",
-                 (NSHomeDirectory() as NSString).appendingPathComponent("src/diskwipe/.build/debug/diskwipe-engine")]
-        return c.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/usr/local/bin/diskwipe-engine"
-    }()
+    // Engine path resolved once; the actual spawning is delegated to EngineClient. (P1.2)
+    private var enginePath: String { EngineClient.shared.enginePath }
 
     func refreshDisks() {
-        guard let arr = runArray([enginePath, "list"], sudo: false) else { return }
+        guard let arr = EngineClient.shared.array(["list"]) else { return }
         disks = arr.map { d in
             DiskItem(id: d["id"] as? String ?? "?", model: d["model"] as? String ?? "?",
                      serial: d["serial"] as? String ?? "", sizeGB: d["sizeGB"] as? Double ?? 0,
@@ -83,29 +80,22 @@ final class DiskHealth: ObservableObject {
     }
 
     func startPolling() {
-        guard pollTimer == nil else { return }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, !self.loading, !self.exporting else { return }
-                self.refreshDisks()
-            }
+        guard watcherId == nil else { return }
+        watcherId = DiskWatcher.shared.register { [weak self] in
+            guard let self, !self.loading, !self.exporting else { return }
+            self.refreshDisks()
         }
     }
-    func stopPolling() { pollTimer?.invalidate(); pollTimer = nil }
+    func stopPolling() { DiskWatcher.shared.unregister(watcherId); watcherId = nil }
 
     func load() {
         guard let disk = selected else { report = nil; partitions = []; return }
         loading = true
         // Fire an auto-snapshot whenever the dashboard inspects a disk. The engine
         // throttles to 1/day/serial — duplicate calls are cheap and harmless.
-        let enginePath = self.enginePath
         let diskID = disk.id
         Task.detached {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-            p.arguments = ["-n", enginePath, "snapshot", "--disk", diskID, "--kind", "snapshot"]
-            p.standardOutput = Pipe(); p.standardError = Pipe()
-            _ = try? p.run(); p.waitUntilExit()
+            _ = EngineClient.shared.runRaw(["snapshot", "--disk", diskID, "--kind", "snapshot"], sudo: true)
         }
         Task.detached { [weak self] in
             guard let self else { return }
@@ -114,7 +104,7 @@ final class DiskHealth: ObservableObject {
             // smartctl flakiness. Backoff stays short so the success case is instant.
             var smart: [String: Any]? = nil
             for attempt in 1...3 {
-                smart = self.runObjectSync([self.enginePath, "smart", "--disk", disk.id], sudo: true)
+                smart = EngineClient.shared.object(["smart", "--disk", disk.id], sudo: true)
                 let ok = ((smart?["model"] as? String).map { $0 != "—" && !$0.isEmpty }) ?? false
                 if ok {
                     if attempt > 1 {
@@ -126,7 +116,7 @@ final class DiskHealth: ObservableObject {
                     "smart attempt \(attempt) returned empty/invalid for disk=\(disk.id) — retrying")
                 if attempt < 3 { Thread.sleep(forTimeInterval: 0.5 * Double(attempt)) }
             }
-            let layout = self.runObjectSync([self.enginePath, "partlist", "--disk", disk.id], sudo: false)
+            let layout = EngineClient.shared.object(["partlist", "--disk", disk.id])
             await MainActor.run {
                 if let s = smart, (s["model"] as? String).map({ $0 != "—" }) ?? false {
                     self.report = Self.parse(s); self.lastError = nil
@@ -156,23 +146,32 @@ final class DiskHealth: ObservableObject {
         exporting = true; exportMessage = Loc.shared.t("export.saving")
         Task.detached { [weak self] in
             guard let self else { return }
-            let r = self.runObjectSync([self.enginePath, "export", "--disk", disk.id, "--format", "all"], sudo: true)
+            let r = EngineClient.shared.object(["export", "--disk", disk.id, "--format", "all"], sudo: true)
             await MainActor.run {
                 self.exporting = false
                 if let r {
-                    // Reveal the most user-friendly format first (html), but report all written paths.
                     let written = [r["md"], r["html"], r["json"]].compactMap { $0 as? String }
-                    if !written.isEmpty {
+                    let errors = r["errors"] as? [String] ?? []
+                    if !written.isEmpty && errors.isEmpty {
+                        // Full success — show file names + reveal in Finder.
                         self.exportMessage = "✓ " + Loc.shared.t("export.saved",
                             written.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
                         if let preferred = (r["html"] as? String) ?? (r["md"] as? String) ?? (r["json"] as? String) {
                             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: preferred)])
                         }
+                    } else if !written.isEmpty {
+                        // Partial success — saved some, failed others. (P1.3)
+                        self.exportMessage = "⚠️ partial: saved \(written.count), failed " + errors.joined(separator: " · ")
+                        AppLog.shared.warn("dash.export", "partial save: errors=\(errors)")
                     } else {
-                        self.exportMessage = "✗ " + Loc.shared.t("export.failed")
+                        // Full failure — show details from engine, not just generic "failed".
+                        let details = errors.isEmpty ? Loc.shared.t("export.failed") : errors.joined(separator: " · ")
+                        self.exportMessage = "✗ " + details
+                        AppLog.shared.error("dash.export", "failed: \(errors)")
                     }
                 } else {
                     self.exportMessage = "✗ " + Loc.shared.t("export.failed")
+                    AppLog.shared.error("dash.export", "no JSON reply from engine")
                 }
             }
         }
@@ -220,30 +219,5 @@ final class DiskHealth: ObservableObject {
         return r
     }
 
-    // process helpers (nonisolated for background use)
-    nonisolated private func runData(_ argv: [String], sudo: Bool) -> Data? {
-        let p = Process()
-        if sudo { p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo"); p.arguments = ["-n"] + argv }
-        else { p.executableURL = URL(fileURLWithPath: argv[0]); p.arguments = Array(argv.dropFirst()) }
-        let out = Pipe(); let err = Pipe()
-        p.standardOutput = out; p.standardError = err
-        do { try p.run() } catch { return nil }
-        let d = out.fileHandleForReading.readDataToEndOfFile()
-        _ = err.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return d
-    }
-    nonisolated private func runArray(_ argv: [String], sudo: Bool) -> [[String: Any]]? {
-        guard let d = runData(argv, sudo: sudo) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: d)) as? [[String: Any]]
-    }
-    nonisolated private func runObjectSync(_ argv: [String], sudo: Bool) -> [String: Any]? {
-        guard let d = runData(argv, sudo: sudo) else { return nil }
-        let text = String(data: d, encoding: .utf8) ?? ""
-        for line in text.split(separator: "\n").reversed() {
-            if let ld = line.data(using: .utf8),
-               let o = try? JSONSerialization.jsonObject(with: ld) as? [String: Any] { return o }
-        }
-        return nil
-    }
+    // (P1.2) Process spawn helpers used to live here; they now live in EngineClient.
 }

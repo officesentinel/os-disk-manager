@@ -7,7 +7,7 @@ private final class LineBuf2 { var data = Data() }
 final class ScanRunner: ObservableObject {
     @Published var disks: [DiskItem] = []
     @Published var selected: DiskItem? { didSet { if oldValue?.id != selected?.id { resetScanState() } } }
-    private var pollTimer: Timer?
+    private var watcherId: UUID?
     @Published var mode = "read"            // read / verify
     @Published var thresholdMs = 200
     @Published var running = false
@@ -24,19 +24,11 @@ final class ScanRunner: ObservableObject {
     // is no longer used at runtime — kept blank to avoid stray hard-coded language.
     static let bandNames: [String] = []
 
-    private let enginePath: String = {
-        let c = ["/usr/local/bin/diskwipe-engine",
-                 (NSHomeDirectory() as NSString).appendingPathComponent("src/diskwipe/.build/debug/diskwipe-engine")]
-        return c.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/usr/local/bin/diskwipe-engine"
-    }()
+    private var enginePath: String { EngineClient.shared.enginePath }
     private var process: Process?
 
     func refreshDisks() {
-        let p = Process(); p.executableURL = URL(fileURLWithPath: enginePath); p.arguments = ["list"]
-        let pipe = Pipe(); p.standardOutput = pipe
-        do { try p.run() } catch { return }
-        let d = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
-        guard let arr = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] else { return }
+        guard let arr = EngineClient.shared.array(["list"]) else { return }
         let new = arr.map { DiskItem(id: $0["id"] as? String ?? "?", model: $0["model"] as? String ?? "?",
                                      serial: $0["serial"] as? String ?? "", sizeGB: $0["sizeGB"] as? Double ?? 0,
                                      busProtocol: $0["busProtocol"] as? String ?? "?", isSSD: $0["isSSD"] as? Bool ?? false) }
@@ -47,17 +39,14 @@ final class ScanRunner: ObservableObject {
         }
     }
 
-    /// Start polling so insertion/removal updates the UI live.
     func startPolling() {
-        guard pollTimer == nil else { return }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, !self.running else { return }
-                self.refreshDisks()
-            }
+        guard watcherId == nil else { return }
+        watcherId = DiskWatcher.shared.register { [weak self] in
+            guard let self, !self.running else { return }
+            self.refreshDisks()
         }
     }
-    func stopPolling() { pollTimer?.invalidate(); pollTimer = nil }
+    func stopPolling() { DiskWatcher.shared.unregister(watcherId); watcherId = nil }
 
     /// Wipe scan results so the previous disk's map/bands don't bleed onto the new one.
     private func resetScanState() {

@@ -47,18 +47,10 @@ final class EngineRunner: ObservableObject {
 
     /// Serials seen during this app session — used to trigger one auto-snapshot per insertion.
     private var seenSerials: Set<String> = []
-    private var pollTimer: Timer?
+    private var watcherId: UUID?
 
-    /// Canonical install path; falls back to local build for dev.
-    private let enginePath: String = {
-        let candidates = [
-            "/usr/local/bin/diskwipe-engine",
-            FileManager.default.currentDirectoryPath + "/.build/debug/diskwipe-engine",
-            (NSHomeDirectory() as NSString).appendingPathComponent("src/diskwipe/.build/debug/diskwipe-engine")
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-            ?? "/usr/local/bin/diskwipe-engine"
-    }()
+    /// Canonical install path resolved via EngineClient.
+    private var enginePath: String { EngineClient.shared.enginePath }
 
     private var process: Process?
 
@@ -71,15 +63,9 @@ final class EngineRunner: ObservableObject {
     ]
 
     func refreshDisks() {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: enginePath)
-        p.arguments = ["list"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        do { try p.run() } catch { appendLog("list failed: \(error)"); return }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+        guard let arr = EngineClient.shared.array(["list"]) else {
+            appendLog("list failed"); return
+        }
         let new = arr.map { d in
             DiskItem(
                 id: d["id"] as? String ?? "?",
@@ -97,17 +83,16 @@ final class EngineRunner: ObservableObject {
         }
     }
 
-    /// Start polling diskutil/engine list every 2 s so insertion/removal updates the UI live.
+    /// Subscribe to disk hot-plug events (DiskArbitration) for live UI updates.
+    /// Replaces the old 3-second timer; idle CPU drops to zero.
     func startPolling() {
-        guard pollTimer == nil else { return }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, !self.running else { return }
-                self.refreshDisks()
-            }
+        guard watcherId == nil else { return }
+        watcherId = DiskWatcher.shared.register { [weak self] in
+            guard let self, !self.running else { return }
+            self.refreshDisks()
         }
     }
-    func stopPolling() { pollTimer?.invalidate(); pollTimer = nil }
+    func stopPolling() { DiskWatcher.shared.unregister(watcherId); watcherId = nil }
 
     /// Called when `selected` changes (manual pick or auto-pick on insertion).
     /// Resets stale run state, restores last persisted run for this disk, and
@@ -130,18 +115,9 @@ final class EngineRunner: ObservableObject {
         }
     }
 
-    /// Fire a `snapshot` engine call in the background; result discarded (file already on disk).
+    /// Fire a `snapshot` engine call in the background; result discarded.
     nonisolated static func runSnapshotSync(enginePath: String, diskID: String) -> [String: Any]? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        p.arguments = ["-n", enginePath, "snapshot", "--disk", diskID, "--kind", "snapshot"]
-        let pipe = Pipe(); let err = Pipe()
-        p.standardOutput = pipe; p.standardError = err
-        do { try p.run() } catch { return nil }
-        let d = pipe.fileHandleForReading.readDataToEndOfFile()
-        _ = err.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+        EngineClient.shared.object(["snapshot", "--disk", diskID, "--kind", "snapshot"], sudo: true)
     }
 
     /// Load most recent run log for the given serial (if any) into phases/log/verdict
