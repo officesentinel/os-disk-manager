@@ -16,6 +16,10 @@ AppIcon.iconset/
 coverage.lcov
 *.xcresult
 
+# Phase 4 distribution artefacts
+dist/
+*.dmg
+
 # Editor
 .vscode/
 .idea/

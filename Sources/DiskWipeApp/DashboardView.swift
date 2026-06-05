@@ -53,15 +53,28 @@ struct DashboardView: View {
         HStack {
             Image(systemName: "gauge.with.dots.needle.67percent")
                 .font(.title2).foregroundStyle(.tint)
+                .accessibilityHidden(true)
             Picker("", selection: $health.selected) {
                 ForEach(health.disks) { d in Text(d.label).tag(Optional(d)) }
             }.labelsHidden()
-            if health.loading { ProgressView().controlSize(.small) }
+                .accessibilityLabel(loc.t("dash.selectDisk"))
+            if health.loading {
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel(loc.t("status.loading"))
+            }
             Spacer()
-            if health.exporting { ProgressView().controlSize(.small) }
+            if health.exporting {
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel(loc.t("status.exporting"))
+            }
             Button { health.exportReport() } label: { Label(loc.t("dash.save"), systemImage: "square.and.arrow.down") }
                 .disabled(health.report == nil || health.exporting)
-            Button { health.refreshDisks() } label: { Image(systemName: "arrow.clockwise") }
+                .accessibilityHint(loc.t("dash.save.hint"))
+            Button { health.refreshDisks() } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .accessibilityLabel(loc.t("common.refresh"))
+            .accessibilityHint(loc.t("dash.refresh.hint"))
         }
     }
 

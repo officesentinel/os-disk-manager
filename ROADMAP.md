@@ -165,39 +165,55 @@ deferred until first successful local run by Owner.
 
 ## Phase 4 — Distribution + polish (1 week)
 
-### P4.1 DMG packaging + auto-update ⏱ 2 ⭐
+### P4.1 DMG packaging + auto-update ⏱ 2 ⭐  ✅ DMG / ◐ Sparkle design ready
 **Why:** users expect a DMG drag-to-Applications, not a git clone.
-**Work:** `create-dmg` for installer; integrate **Sparkle** framework for in-app
-auto-update from a static appcast hosted on GitHub Pages or our own CDN. Sign
-the appcast with EdDSA.
+**Done — DMG:** `Scripts/dmg/make-dmg.sh` produces a versioned UDZO DMG
+with the .app + a /Applications symlink. Auto-detects Developer ID for
+signing the DMG itself; works ad-hoc for local. Verified on Apple Silicon
+producing `dist/DiskWipe-1.0-arm64.dmg` (≈1 MB compressed).
+**Done — Sparkle:** Integration design at [docs/sparkle/SPARKLE_INTEGRATION.md](docs/sparkle/SPARKLE_INTEGRATION.md):
+SPM dependency, Info.plist keys (SUFeedURL, SUPublicEDKey, daily check
+interval), Swift hookup (SPUStandardUpdaterController, menu item),
+EdDSA key generation recipe, appcast generator script template, risk
+analysis (network entitlement, key custody, feed URL longevity).
+Integration gated on first Developer ID release + Owner generating
+EdDSA keypair.
 **Done when:** double-click DMG → drag to Applications → first launch → app
 notices version 0.2 is available and prompts.
 
-### P4.2 Crash reporter ⏱ 1
-**Why:** crashes today are silent (no `~/Library/Logs` aggregator). Without
-telemetry we won't see production issues.
-**Work:** integrate **PLCrashReporter** or **Sentry**. Opt-in by default with
-GDPR-friendly toggle.
-**Done when:** test crash sends a report to our endpoint with redacted PII.
+### P4.2 Crash reporter ⏱ 1  ◐ design doc ready
+**Why:** crashes today are silent. Without telemetry we won't see production issues.
+**Done:** Strategy at [docs/CRASH_REPORTING.md](docs/CRASH_REPORTING.md):
+chosen PLCrashReporter over Sentry/Bugsnag (GDPR-trivial, $0, local-only
+default with opt-in transmission), full architecture (handler →
+.plcrash file → preview/send/discard modal), PII redaction policy (SHA-256
+prefix-8 for disk serials, volume name redaction, mount path collapse),
+SPM dependency, sender-endpoint plan, open questions (cert pin, mid-wipe
+crashes, sparkle:criticalUpdate recall mechanism).
 
 ### P4.3 Localised release notes + in-app changelog ⏱ 0.5
-**Why:** users should see "what's new" on update without leaving the app.
-**Work:** Sparkle release notes URL, localised per Lang. In-app "About → What's
-new" pane.
+**Slot status:** deferred to first signed release (no release notes exist
+to localise until then).
 
 ### P4.4 Help / inline tooltips polish ⏱ 1
-**Why:** technical labels (DZAT, PLP, sanitize) need contextual hover help that
-links to documentation.
-**Work:** all `.help()` strings have a "learn more" URL going to a Hugo-built
-docs site. Localised. Same site is the public landing page.
+**Slot status:** deferred — gated on Hugo docs site existing.
 
-### P4.5 Accessibility audit ⏱ 0.5
+### P4.5 Accessibility audit ⏱ 0.5  ◐ first pass done, audit doc ready
 **Why:** SwiftUI gives a lot for free but custom chips and HFlow may break
 VoiceOver, contrast and Dynamic Type.
-**Work:** run Accessibility Inspector; add `.accessibilityLabel`, sensible
-hierarchy, ensure all interactive elements ≥ 44 pt hit target.
+**Done:** First pass on `DashboardView.diskSelector` (highest-traffic surface):
+icon-hidden the decorative gauge, gave the Picker an
+`.accessibilityLabel`, labelled the loading/exporting progress views,
+added hints to the Save and Refresh buttons (Refresh was the worst —
+icon-only with no spoken text). Three new localisation keys × three
+languages. Full remaining-work audit at
+[docs/ACCESSIBILITY_AUDIT.md](docs/ACCESSIBILITY_AUDIT.md) with priority
+list (Dashboard 12 items, PartitionView 15, ScanView 8, HistoryView 6,
+ContentView 3), Dynamic Type concerns, contrast notes, and Owner-side
+tooling steps (Accessibility Inspector audit workflow).
 
-**Phase 4 total: ~1 week.**
+**Phase 4 total: ~1 week. P4.1 (DMG) + P4.5 (a11y first pass) ✅ landed;
+P4.2-P4.4 docs in place, implementation gated on P3.1 release pipeline.**
 
 ---
 
