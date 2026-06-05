@@ -67,20 +67,36 @@ enum Snapshot {
             ]
         }
 
-        // Race protection: use mkdir(O_EXCL semantics) on a daily lock dir.
-        // Multiple concurrent tabs all spawn the engine; without this lock, two
-        // engine instances can both see "no today file" and both write a dup.
+        // Race protection: advisory flock on a per-day lock file. Multiple concurrent
+        // tabs all spawn the engine; without this lock, two engine instances can both
+        // see "no today file" and both write a dup.
+        //
+        // flock is preferred over mkdir(O_EXCL) because the kernel releases it
+        // automatically when the process exits — even on SIGKILL — so a crashed
+        // engine leaves no stale lock behind. (P1.1 fix.)
         let dayFmt2 = DateFormatter()
         dayFmt2.locale = Locale(identifier: "en_US_POSIX"); dayFmt2.dateFormat = "yyyy-MM-dd"
         let lockPath = (dir as NSString).appendingPathComponent(".lock-\(dayFmt2.string(from: Date()))")
-        if mkdir(lockPath, 0o755) != 0 {
-            // Lock already held → another process wrote today's snapshot moments ago.
-            Logger.info("snapshot", "skipped — lock held by concurrent writer for serial=\(serial)")
-            // Best-effort: return the freshest file that exists.
+        let lockFd = open(lockPath, O_CREAT | O_WRONLY, 0o644)
+        if lockFd < 0 {
+            // Can't even create the lock file — proceed without locking rather than
+            // failing the whole snapshot. Worst case: rare concurrent dup.
+            Logger.warn("snapshot", "couldn't open lock file \(lockPath): errno=\(errno)")
+        } else if flock(lockFd, LOCK_EX | LOCK_NB) != 0 {
+            close(lockFd)
+            // Another live process is writing today's snapshot right now.
+            Logger.info("snapshot", "skipped — flock held by concurrent writer for serial=\(serial)")
             let latest = latestSnapshotPath(serial: serial) ?? ""
             return ["skipped": true, "reason": "concurrent-write", "path": latest, "serial": serial]
         }
-        defer { _ = rmdir(lockPath) }   // release lock
+        defer {
+            if lockFd >= 0 {
+                _ = flock(lockFd, LOCK_UN)
+                close(lockFd)
+                // Best-effort cleanup of the lock file itself; harmless if it stays.
+                _ = unlink(lockPath)
+            }
+        }
 
         var snap: [String: Any] = [
             "schemaVersion": schemaVersion,
