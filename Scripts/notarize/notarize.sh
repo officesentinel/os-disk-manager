@@ -40,11 +40,50 @@ if [ ! -f "$AC_API_KEY_PATH" ]; then
     exit 1
 fi
 
-# Pre-flight: bundle must be Developer-ID signed, not ad-hoc.
+# Pre-flight 1: bundle must be Developer-ID signed, not ad-hoc.
 if codesign -dv "$APP_PATH" 2>&1 | grep -q "Signature=adhoc"; then
     echo "==> ERROR: $APP_PATH is ad-hoc signed. Run sign.sh with TEAM_ID set first."
     exit 1
 fi
+
+# Pre-flight 2: every embedded Mach-O must be hardened-runtime signed.
+# Notary service rejects bundles with any unsigned or non-hardened binary
+# and we wait 5-30 minutes to discover that. Catch it now.
+echo "==> Pre-flight: scanning bundle for unsigned / non-hardened Mach-Os…"
+UNSIGNED=0
+while IFS= read -r f; do
+    # Skip non-Mach-O (resources, plists).
+    if ! file -b "$f" | grep -q "Mach-O"; then continue; fi
+    # Examine each Mach-O.
+    SIG_OUT="$(codesign -dvv "$f" 2>&1 || true)"
+    if echo "$SIG_OUT" | grep -q "code object is not signed"; then
+        echo "    UNSIGNED: $f"
+        UNSIGNED=$((UNSIGNED+1))
+        continue
+    fi
+    if echo "$SIG_OUT" | grep -q "Signature=adhoc"; then
+        echo "    AD-HOC SIGNED: $f"
+        UNSIGNED=$((UNSIGNED+1))
+        continue
+    fi
+    # Hardened-runtime flag (0x10000) must be set; codesign reports it
+    # as "runtime" in the flags line.
+    if ! echo "$SIG_OUT" | grep -q "flags=0x10000(runtime)"; then
+        # Some builds report it as "0x12000(runtime,linker-signed)" etc.
+        if ! echo "$SIG_OUT" | grep -Eq "flags=0x[0-9a-f]+\([^)]*runtime"; then
+            echo "    NO HARDENED RUNTIME: $f"
+            UNSIGNED=$((UNSIGNED+1))
+            continue
+        fi
+    fi
+done < <(find "$APP_PATH" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.framework' \))
+
+if [ "$UNSIGNED" -gt 0 ]; then
+    echo "==> ERROR: $UNSIGNED binary(ies) failed pre-flight."
+    echo "    Re-run Scripts/notarize/sign.sh; notary submission cancelled."
+    exit 1
+fi
+echo "==> Pre-flight clean. Proceeding to submission."
 
 STAGING_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGING_DIR"' EXIT

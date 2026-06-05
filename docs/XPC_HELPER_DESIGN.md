@@ -102,8 +102,10 @@ keeps the migration mechanical.
 
 ## 5. Authorization rights
 
-Registered in `/var/db/SystemPolicy.kext-policy` via
-`AuthorizationRightSet` at first launch:
+Registered via `AuthorizationRightSet` at first launch. We split rights
+into three tiers by privilege level:
+
+**Tier A — destructive (per-action prompt, every time):**
 
 | Right name                                           | Default rule          | Prompt label                                |
 |------------------------------------------------------|-----------------------|---------------------------------------------|
@@ -113,35 +115,89 @@ Registered in `/var/db/SystemPolicy.kext-policy` via
 | `org.officesentinel.disk-manager.resize`             | `authenticate-admin`  | "DiskManager wants to resize %@."           |
 | `org.officesentinel.disk-manager.delPart`            | `authenticate-admin`  | "DiskManager wants to delete partition %@." |
 | `org.officesentinel.disk-manager.addVolume`          | `authenticate-admin`  | "DiskManager wants to add a volume on %@."  |
-| `org.officesentinel.disk-manager.snapshot`           | (not protected)       | —                                           |
-| `org.officesentinel.disk-manager.scan`               | (not protected)       | —                                           |
+
+**Tier B — privileged read (session-scoped, prompt once per launch):**
+
+These commands need root for raw `/dev/diskN` access (so they cannot be
+"not protected") but are non-destructive. Using rule `authenticate-admin`
+with `timeout` = `<session-end>` so the user authenticates once and
+subsequent reads in the same launch reuse the credential. This avoids
+the UX-destroying pattern of "auth prompt every 5 seconds while
+the dashboard auto-refreshes" while still keeping a privileged barrier.
+
+| Right name                                           | Rule                         | Prompt label                              |
+|------------------------------------------------------|------------------------------|-------------------------------------------|
+| `org.officesentinel.disk-manager.snapshot`           | `authenticate-admin`, session| "DiskManager wants to read SMART data."   |
+| `org.officesentinel.disk-manager.scan`               | `authenticate-admin`, session| "DiskManager wants to surface-scan %@."   |
+| `org.officesentinel.disk-manager.smart`              | `authenticate-admin`, session| "DiskManager wants to read SMART data."   |
+
+**Tier C — unprivileged (no root needed, no prompt):**
+
+| Right name                                           | Rule                         |
+|------------------------------------------------------|------------------------------|
+| `org.officesentinel.disk-manager.list`               | `allow`                      |
+| `org.officesentinel.disk-manager.history`            | `allow`                      |
+| `org.officesentinel.disk-manager.partlist`           | `allow`                      |
 
 `authenticate-admin` triggers Touch ID if `/etc/pam.d/sudo_local` enables
-`pam_tid.so`; otherwise password.
+`pam_tid.so`; otherwise password. Session-scoped rights honour the user's
+"Authenticate for X minutes" timeout configured in System Settings.
+
+> **Why scan/snapshot aren't `allow`:** both call `smartctl` and
+> `dd if=/dev/diskN`, which need root to bypass `/etc/authorization`
+> read restrictions. An unauthenticated XPC client asking the helper to
+> scan a connected disk would leak SMART data (serial, family, wear,
+> hour count) — those are tracking-grade identifiers.
 
 ## 6. Helper code-requirement validation
 
 Before honouring any XPC connection, the helper must validate the calling
 process's code signature so a malicious unsigned app can't impersonate the
-GUI:
+GUI.
+
+**⚠️ Security note — do NOT use `connection.processIdentifier` for this.**
+A pid-based lookup has a TOCTOU race: between the moment the helper reads
+the pid and the moment `SecCodeCheckValidity` runs, the calling process
+can `exec()` into a different binary, defeating the check. Apple's
+sample-code guidance (`SimpleXPC`, WWDC 2020 session 10025) is to use the
+client's *audit token* — it is bound to the original process identity at
+connection time and survives any subsequent exec.
 
 ```swift
+import Security
+
 private func validate(connection: NSXPCConnection) -> Bool {
-    let pid = connection.processIdentifier
+    // 1. Capture the audit token bound to this connection.
+    let token = connection.auditToken               // sizeof(audit_token_t) == 32 bytes
+    let tokenData = Data(bytes: withUnsafeBytes(of: token) { Data($0) })
+
+    // 2. Resolve a SecCode for the *connection-bound* identity.
     var code: SecCode?
-    SecCodeCopyGuestWithAttributes(nil,
-        [kSecGuestAttributePid: pid] as CFDictionary, [], &code)
-    guard let c = code else { return false }
+    let attrs: [CFString: Any] = [kSecGuestAttributeAudit: tokenData]
+    guard SecCodeCopyGuestWithAttributes(nil, attrs as CFDictionary, [], &code) == errSecSuccess,
+          let c = code else { return false }
+
+    // 3. Build the Designated Requirement template.
+    //    TEAM_ID is patched in by Scripts/notarize/sign.sh at build time
+    //    from $TEAM_ID — see scripts for the sed/awk substitution recipe.
     let req = """
     identifier "org.officesentinel.disk-manager"
     and anchor apple generic
     and certificate leaf[subject.OU] = "\(TEAM_ID)"
     """
     var reqRef: SecRequirement?
-    SecRequirementCreateWithString(req as CFString, [], &reqRef)
-    return SecCodeCheckValidity(c, [], reqRef) == errSecSuccess
+    guard SecRequirementCreateWithString(req as CFString, [], &reqRef) == errSecSuccess,
+          let r = reqRef else { return false }
+
+    return SecCodeCheckValidity(c, [], r) == errSecSuccess
 }
 ```
+
+`NSXPCConnection.auditToken` is API since macOS 11; we already target
+macOS 14 so this is unconditional. The check must run inside
+`shouldAcceptNewConnection` BEFORE setting `exportedInterface` and
+`exportedObject` on the connection — a misordered helper would expose
+the protocol to an unvalidated client.
 
 `TEAM_ID` is patched in by `Scripts/notarize/sign.sh` at build time.
 

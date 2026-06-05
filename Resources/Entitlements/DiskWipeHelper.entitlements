@@ -17,17 +17,19 @@
     <false/>
 
     <!--
-        Code-requirement string that the GUI must satisfy when connecting
-        via XPC. Filled in at build time by Scripts/notarize/sign.sh once
-        the Developer ID Team ID is known. Without this the helper would
-        accept connections from any process — fatal flaw.
-
-        Template: identifier "org.officesentinel.disk-manager"
-                  and anchor apple generic
-                  and certificate leaf[subject.OU] = "<TEAM_ID>"
+        NOTE: there is NO `com.apple.security.application-identifier` here
+        on purpose. That key is iOS / sandboxed-app only; on macOS Developer
+        ID it has no enforcement effect, so including it would falsely
+        suggest a check that doesn't happen. The actual client-binding
+        guarantee comes from:
+          (a) the LaunchDaemons plist's MachServices dict (registers the
+              global name `org.officesentinel.disk-manager.helper`)
+          (b) the helper's `shouldAcceptNewConnection` method, which
+              validates the caller's *audit token* against the GUI's
+              Designated Requirement string. See XPC_HELPER_DESIGN.md §6.
     -->
-    <key>com.apple.security.application-identifier</key>
-    <string>org.officesentinel.disk-manager.helper</string>
+    <!-- Helper itself signs as `org.officesentinel.disk-manager.helper`
+         via the codesign --identifier flag in Scripts/notarize/sign.sh. -->
 
     <!-- Hardened-runtime hardening. -->
     <key>com.apple.security.cs.allow-jit</key>
