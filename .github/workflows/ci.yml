@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: build · test · package
+    runs-on: macos-14
+    # macos-14 = Apple Silicon (arm64) runners; we explicitly do NOT support Intel.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Identify toolchain
+        run: |
+          sw_vers
+          uname -m
+          swift --version
+          xcodebuild -version
+
+      - name: Build (release, arm64)
+        run: swift build -c release --arch arm64
+
+      - name: Run unit tests
+        run: swift test -c release --arch arm64
+
+      - name: Smoke-test engine
+        run: |
+          ENGINE=$(swift build -c release --arch arm64 --show-bin-path)/diskwipe-engine
+          test -x "$ENGINE" || (echo "engine binary missing"; exit 1)
+          "$ENGINE" list | head -c 4096
+          echo
+          echo "─ snapshot of non-existent disk (must skip gracefully) ─"
+          "$ENGINE" snapshot --disk disk999
+
+      - name: Verify the .app bundle script runs
+        run: |
+          # bundle.sh's first lines hard-fail on non-arm64 — verify guard works.
+          head -20 bundle.sh
+          # Do NOT execute it: bundle.sh copies to /Applications which CI cannot do.

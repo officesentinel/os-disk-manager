@@ -1,5 +1,7 @@
 # OS Disk Manager
 
+[![CI](https://github.com/officesentinel/os-disk-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/officesentinel/os-disk-manager/actions/workflows/ci.yml)
+
 > Native macOS disk inspector, wiper and partition manager for Apple Silicon
 
 **Office Sentinel Disk Manager** — native (arm64) macOS app for inspecting, wiping

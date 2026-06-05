@@ -225,12 +225,13 @@ enum Snapshot {
     }
 
     /// True if the snapshot's timestamp ("yyyy-MM-dd_HH-mm-ss") is in the same
-    /// local calendar day as `Date()`.
-    private static func isSameLocalDay(_ stamp: String) -> Bool {
+    /// local calendar day as `now` (default = current time). Exposed for unit
+    /// tests; not part of the engine's public API.
+    static func isSameLocalDay(_ stamp: String, now: Date = Date()) -> Bool {
         let dayFmt = DateFormatter()
         dayFmt.locale = Locale(identifier: "en_US_POSIX")
         dayFmt.dateFormat = "yyyy-MM-dd"
-        return stamp.hasPrefix(dayFmt.string(from: Date()))
+        return stamp.hasPrefix(dayFmt.string(from: now))
     }
 
     private static func snapshotFiles(in dir: String) -> [String] {

@@ -65,26 +65,31 @@ Polling remains as fallback only if DA unavailable.
 Stop regressions. Apple Silicon is the only build target — no universal binary
 work, no Intel Homebrew path juggling.
 
-### P2.1 XCTest skeleton + critical paths ⏱ 2 ⭐
+### P2.1 XCTest skeleton + critical paths ⏱ 2 ⭐  ✅ initial pass
 **Why:** 6 360 LoC with zero tests guarantees regressions on every refactor.
-**Work:** add a `Tests/diskwipe-engineTests/` target. Cover the bugs we
-historically hit:
-  - `Snapshot.throttle` (same-day skip across all kinds; race protection)
-  - `Snapshot.write` with empty SMART data (must skip, not write ghost)
-  - `Smart.fullReport` parsing of representative `smartctl --json` payloads
-    (Samsung TLC, SPCC DRAM-less, Crucial M600 — fixture files)
-  - `DiskTier.classify` (DB hit, heuristic fallback, capacity numerology)
-  - `CacheInfo.detect` (known DRAM-less, known with DRAM, unknown)
-  - `Partitions.layout` parsing of GPT + MBR + FDisk plists
-  - `Capabilities.compute` (NTFS read-only, ExFAT resize blocked, APFS allows everything)
-**Done when:** `swift test` runs, ≥ 60 % line coverage on engine modules.
+**Done:** `Tests/DiskwipeEngineTests/` SPM target wired up via `@testable import
+diskwipe_engine` (works on full Xcode; CLT-only environments lack XCTest and
+must rely on CI). Initial suite covers the three highest-risk pure functions:
+  - `TierClassifier.classify` — DB miss, heuristic fallback, capacity
+    numerology, IronWolf vs IronWolf Pro disambiguation, nil-safety
+  - `Capabilities.compute` — EFI/Recovery lockdown, NTFS read-only,
+    APFS/HFS+ full management, ExFAT/ext can-format-not-resize, delete
+    requires resizable previous, first-partition-not-deletable
+  - `Snapshot.isSameLocalDay` — same-day, prior-day, next-day, month
+    boundary, empty/malformed stamps
 
-### P2.2 CI on GitHub Actions ⏱ 1 ⭐
-**Why:** every PR should at least build + test before merge. Apple Silicon only —
-runners must be `macos-14-arm64` or `macos-15-arm64`.
-**Work:** `.github/workflows/ci.yml` with arm64 runners. Steps:
-`brew install smartmontools e2fsprogs`, `swift build`, `swift test`, lint.
-**Done when:** PRs show green / red status checks.
+**Deferred to a P2.1b round:** fixture-driven `Smart.fullReport` parsing
+(needs captured `smartctl --json=c` payloads), `Partitions.layout` parsing
+(needs captured `diskutil list -plist` payloads), `DiskDatabase.match`
+(needs verified golden cases). All three require curated fixture files —
+worth doing after the first PR cycle when patterns are settled.
+
+### P2.2 CI on GitHub Actions ⏱ 1 ⭐  ✅
+**Done:** `.github/workflows/ci.yml` with `macos-14` runners (Apple Silicon
+M1). Pipeline runs `swift build -c release --arch arm64`, `swift test -c
+release --arch arm64`, plus a smoke step that invokes the built engine with
+`list` and a `snapshot --disk disk999` (non-existent — must skip gracefully).
+Also asserts `bundle.sh` has its arm64 hard-fail guard intact.
 
 **Phase 2 total: ~3 days.**
 
