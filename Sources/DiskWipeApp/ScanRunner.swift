@@ -27,15 +27,22 @@ final class ScanRunner: ObservableObject {
     private var enginePath: String { EngineClient.shared.enginePath }
     private var process: Process?
 
+    /// Engine `list` runs off the main actor — a synchronous Process spawn
+    /// here froze the UI on every DiskArbitration hot-plug event.
     func refreshDisks() {
-        guard let arr = EngineClient.shared.array(["list"]) else { return }
-        let new = arr.map { DiskItem(id: $0["id"] as? String ?? "?", model: $0["model"] as? String ?? "?",
-                                     serial: $0["serial"] as? String ?? "", sizeGB: $0["sizeGB"] as? Double ?? 0,
-                                     busProtocol: $0["busProtocol"] as? String ?? "?", isSSD: $0["isSSD"] as? Bool ?? false) }
-        if new != disks { disks = new }
-        // Auto-switch selection if the current disk was removed/swapped.
-        if selected == nil || !disks.contains(where: { $0.id == selected?.id }) {
-            selected = disks.first
+        Task.detached { [weak self] in
+            let arr = EngineClient.shared.array(["list"]) ?? []
+            await MainActor.run {
+                guard let self else { return }
+                let new = arr.map { DiskItem(id: $0["id"] as? String ?? "?", model: $0["model"] as? String ?? "?",
+                                             serial: $0["serial"] as? String ?? "", sizeGB: $0["sizeGB"] as? Double ?? 0,
+                                             busProtocol: $0["busProtocol"] as? String ?? "?", isSSD: $0["isSSD"] as? Bool ?? false) }
+                if new != self.disks { self.disks = new }
+                // Auto-switch selection if the current disk was removed/swapped.
+                if self.selected == nil || !self.disks.contains(where: { $0.id == self.selected?.id }) {
+                    self.selected = self.disks.first
+                }
+            }
         }
     }
 

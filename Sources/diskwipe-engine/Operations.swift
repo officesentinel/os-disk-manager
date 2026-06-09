@@ -77,7 +77,7 @@ enum Operations {
                 meter.update(done: written)
             }
         }
-        fsync(fd)
+        flushToMedia(fd, label: "erase_full")
         meter.finish(done: written)
         let snap = SpeedSnapshot(minBps: meter.minBps, avgBps: meter.lastAvgBps,
                                  maxBps: meter.maxBps,
@@ -95,26 +95,55 @@ enum Operations {
         Emit.phase("erase_quick", status: "start", detail: "zap headers + TRIM")
         let fd = open(disk.rawNode, O_WRONLY)
         guard fd >= 0 else { throw OpError.openFailed(disk.rawNode, errno) }
+        defer { close(fd) }
         let zapSize = Int64(64 * 1024 * 1024)   // 64 MiB head & tail
         let buf = [UInt8](repeating: 0, count: Int(min(zapSize, disk.sizeBytes)))
-        buf.withUnsafeBytes { raw in
+
+        // Checked write loop — quick mode has no verify pass, so a swallowed
+        // write error here would falsely report "headers zeroed" while the
+        // partition table (and user data in the first MBs) is fully intact.
+        func writeFully(at offset: Int64, count: Int, _ base: UnsafeRawPointer) throws {
+            guard lseek(fd, off_t(offset), SEEK_SET) >= 0 else {
+                throw OpError.ioFailed("lseek(\(offset))", errno)
+            }
+            var off = 0
+            while off < count {
+                let n = write(fd, base + off, count - off)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw OpError.ioFailed("write@\(offset + Int64(off))", errno)
+                }
+                off += n
+            }
+        }
+        try buf.withUnsafeBytes { raw in
             let base = raw.baseAddress!
             // Head
-            lseek(fd, 0, SEEK_SET)
-            _ = write(fd, base, buf.count)
-            // Tail (GPT backup lives at the very end)
+            try writeFully(at: 0, count: buf.count, base)
+            // Tail (GPT backup lives at the very end), aligned down to block size
             let tailStart = max(0, disk.sizeBytes - zapSize)
-            // align down to block size
             let aligned = tailStart - (tailStart % disk.blockSize)
-            lseek(fd, off_t(aligned), SEEK_SET)
-            _ = write(fd, base, Int(disk.sizeBytes - aligned))
+            try writeFully(at: aligned, count: Int(disk.sizeBytes - aligned), base)
         }
-        fsync(fd)
-        close(fd)
+        flushToMedia(fd, label: "erase_quick")
         Emit.phase("erase_quick", status: "progress", detail: "headers zeroed, issuing TRIM")
         // Rebuild empty GPT (also discards/Trims the whole SSD on APFS-aware diskutil).
         _ = Shell.run(Shell.diskutil, ["eraseDisk", "free", "EMPTY", "GPT", disk.id])
         Emit.phase("erase_quick", status: "done", detail: "headers zeroed + empty GPT")
+    }
+
+    /// Flush data all the way to the physical media. On macOS `fsync()` only
+    /// pushes to the drive, NOT through its volatile write cache —
+    /// `F_FULLFSYNC` is the real barrier. If the user yanks the cable right
+    /// after "done", anything short of a full flush may be lost.
+    static func flushToMedia(_ fd: Int32, label: String) {
+        if fsync(fd) != 0 {
+            Logger.warn(label, "fsync failed: errno=\(errno)")
+        }
+        if fcntl(fd, F_FULLFSYNC) != 0 {
+            // Many USB-SATA bridges don't support it; harmless, log only.
+            Logger.info(label, "F_FULLFSYNC unsupported (errno=\(errno)) — relying on fsync")
+        }
     }
 
     /// Sector-by-sector read of the whole device verifying every byte is zero.
@@ -171,6 +200,14 @@ enum Operations {
                                  maxBps: meter.maxBps,
                                  elapsedSec: Date().timeIntervalSince(meter.start),
                                  totalBytes: readBytes)
+        // Early EOF = we verified LESS than the device's reported size — that
+        // is a failure, not a success with a smaller number. USB bridges that
+        // misreport capacity hit this path.
+        if readBytes < total {
+            Emit.phase("verify", status: "failed",
+                       detail: "short read: got \(readBytes) of \(total) bytes — device size mismatch / EOF")
+            throw OpError.ioFailed("verify short-read (\(readBytes)/\(total))", EIO)
+        }
         if nonZero == 0 {
             Emit.phase("verify", status: "done",
                        detail: "read \(readBytes) bytes, 0 non-zero, \(meter.elapsedString) — \(snap.summary)")

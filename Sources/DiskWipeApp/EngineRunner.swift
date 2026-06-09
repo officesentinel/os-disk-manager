@@ -62,24 +62,30 @@ final class EngineRunner: ObservableObject {
         ("verify", ""), ("smart_long", ""), ("finalize", ""), ("report", ""), ("eject", "")
     ]
 
+    /// Engine `list` runs off the main actor — a synchronous Process spawn
+    /// here froze the UI on every DiskArbitration hot-plug event.
     func refreshDisks() {
-        guard let arr = EngineClient.shared.array(["list"]) else {
-            appendLog("list failed"); return
-        }
-        let new = arr.map { d in
-            DiskItem(
-                id: d["id"] as? String ?? "?",
-                model: d["model"] as? String ?? "?",
-                serial: d["serial"] as? String ?? "",
-                sizeGB: d["sizeGB"] as? Double ?? 0,
-                busProtocol: d["busProtocol"] as? String ?? "?",
-                isSSD: d["isSSD"] as? Bool ?? false
-            )
-        }
-        if new != disks { disks = new }
-        // If the currently-selected disk is no longer present (swapped/removed), pick the first available.
-        if selected == nil || !disks.contains(where: { $0 == selected }) {
-            selected = disks.first
+        Task.detached { [weak self] in
+            let arr = EngineClient.shared.array(["list"])
+            await MainActor.run {
+                guard let self else { return }
+                guard let arr else { self.appendLog("list failed"); return }
+                let new = arr.map { d in
+                    DiskItem(
+                        id: d["id"] as? String ?? "?",
+                        model: d["model"] as? String ?? "?",
+                        serial: d["serial"] as? String ?? "",
+                        sizeGB: d["sizeGB"] as? Double ?? 0,
+                        busProtocol: d["busProtocol"] as? String ?? "?",
+                        isSSD: d["isSSD"] as? Bool ?? false
+                    )
+                }
+                if new != self.disks { self.disks = new }
+                // If the currently-selected disk is no longer present (swapped/removed), pick the first available.
+                if self.selected == nil || !self.disks.contains(where: { $0 == self.selected }) {
+                    self.selected = self.disks.first
+                }
+            }
         }
     }
 
@@ -194,6 +200,10 @@ final class EngineRunner: ObservableObject {
         appendLog("→ \(disk.label)  [\(mode) erase]")
 
         var args = ["-n", enginePath, "run", "--disk", disk.id, "--mode", mode]
+        // Pin the serial the user actually saw: BSD numbers ("disk4") are
+        // recycled on unplug/replug, so without this a swapped disk would be
+        // wiped under the old number. The engine aborts on mismatch.
+        if !disk.serial.isEmpty { args += ["--serial", disk.serial] }
         if !doVerify { args += ["--no-verify"] }
         if !doSmartLong { args += ["--no-smart-long"] }
         if !doEject { args += ["--no-eject"] }

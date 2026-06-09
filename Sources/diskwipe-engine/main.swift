@@ -58,15 +58,26 @@ case "run":
         Emit.error("refusing internal disk \(id) (use --force-internal to override)")
         exit(1)
     }
+    // Safety: BSD disk numbers are reused across unplug/replug, so "disk4" may
+    // now be a different physical disk than the one the user selected in the
+    // GUI. The GUI pins the expected serial; mismatch aborts before any write.
+    if let expected = opts["serial"], !expected.isEmpty, disk.serial != expected {
+        Emit.error("serial mismatch on \(id): expected \(expected), found \(disk.serial.isEmpty ? "<none>" : disk.serial) — disk was swapped, aborting")
+        exit(1)
+    }
     Emit.event("disk", disk.dictionary)
     Emit.phase("start", status: "begin", detail: "\(disk.model) \(disk.serial) — \(mode) erase")
 
-    // Prevent system/display/disk sleep for the whole pipeline. Killed in `defer`.
+    // Prevent system/display/disk sleep for the whole pipeline.
+    // `-w <our pid>` makes caffeinate exit on its own when this process dies
+    // for ANY reason — including SIGTERM/SIGKILL, where `defer` never runs.
+    // Without it, a cancelled wipe leaves an orphan caffeinate keeping the
+    // Mac awake until reboot.
     let caffeinate = Process()
     caffeinate.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-    caffeinate.arguments = ["-dims"]
+    caffeinate.arguments = ["-dims", "-w", String(ProcessInfo.processInfo.processIdentifier)]
     try? caffeinate.run()
-    Logger.info("engine", "caffeinate -dims started pid=\(caffeinate.processIdentifier)")
+    Logger.info("engine", "caffeinate -dims -w \(ProcessInfo.processInfo.processIdentifier) started pid=\(caffeinate.processIdentifier)")
     defer {
         if caffeinate.isRunning { caffeinate.terminate() }
         Logger.info("engine", "caffeinate stopped")
@@ -79,10 +90,19 @@ case "run":
     Emit.phase("smart_pre", status: "done",
                detail: pre.healthPassed == true ? "PASSED" : "see attrs")
 
-    // 2. Unmount
+    // 2. Unmount — check the result: if a volume stays mounted, the raw-device
+    // open below typically fails with EBUSY and the user gets a cryptic errno.
+    // Surface the real cause here instead.
     Emit.phase("unmount", status: "start")
-    _ = Shell.run(Shell.diskutil, ["unmountDisk", "force", disk.node])
-    Emit.phase("unmount", status: "done")
+    let unmountRes = Shell.run(Shell.diskutil, ["unmountDisk", "force", disk.node])
+    if unmountRes.ok {
+        Emit.phase("unmount", status: "done")
+    } else {
+        Emit.phase("unmount", status: "failed",
+                   detail: unmountRes.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        Emit.error("unmountDisk failed — volume in use? \(unmountRes.stderr.prefix(200))")
+        exit(1)
+    }
 
     var eraseSummary = "—", verifySummary = "skipped", longSummary = "skipped"
     var eraseSpeed: SpeedSnapshot? = nil
@@ -117,12 +137,23 @@ case "run":
         if let mins = Smart.startLongTest(disk.node) {
             Emit.phase("smart_long", status: "running", detail: "~\(mins) min")
             let testStart = Date()
+            // Hard deadline: 3× the firmware estimate, floor 1 h. Protects
+            // against a wedged USB bridge reporting "in progress" forever.
+            let deadline = testStart.addingTimeInterval(max(3600, Double(mins) * 60 * 3))
             var lastRemaining: Int? = nil
             var lastBumpTime = testStart
             var instBps: Double = 0
             var done = false
+            var timedOut = false
             while !done {
                 Thread.sleep(forTimeInterval: 15)
+                if Date() > deadline {
+                    Emit.phase("smart_long", status: "failed",
+                               detail: "timeout after \(Emit.formatETA(Date().timeIntervalSince(testStart))) — bridge wedged?")
+                    longSummary = "timed out (no firmware progress)"
+                    timedOut = true
+                    break
+                }
                 let p = Smart.longTestProgress(disk.node)
                 if p.inProgress {
                     let now = Date()
@@ -147,8 +178,10 @@ case "run":
                                   instBps: instBps, avgBps: avgBps, etaSec: etaSec)
                 } else { done = true }
             }
-            longSummary = Smart.lastSelfTestResult(disk.node)
-            Emit.phase("smart_long", status: "done", detail: longSummary)
+            if !timedOut {
+                longSummary = Smart.lastSelfTestResult(disk.node)
+                Emit.phase("smart_long", status: "done", detail: longSummary)
+            }
         } else {
             longSummary = "could not start"
             Emit.phase("smart_long", status: "failed")
@@ -214,7 +247,8 @@ case "scan":
     // Prevent sleep during the scan as well.
     let caffeinateScan = Process()
     caffeinateScan.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-    caffeinateScan.arguments = ["-dims"]
+    // `-w <pid>`: self-exit when the engine dies, incl. SIGTERM where defer never runs.
+    caffeinateScan.arguments = ["-dims", "-w", String(ProcessInfo.processInfo.processIdentifier)]
     try? caffeinateScan.run()
     defer { if caffeinateScan.isRunning { caffeinateScan.terminate() } }
     do {
@@ -263,25 +297,51 @@ case "repartition", "format", "resize", "addvolume", "delpart":
             exit(1)
         }
     }
+    // Safety: the engine sits behind a NOPASSWD sudoers grant, so IT is the
+    // privilege boundary — not the GUI. Without this guard, any process could
+    // run `sudo -n diskwipe-engine repartition --disk disk0 …` and destroy
+    // the boot disk's partition table. Volume ids ("disk4s2") resolve to
+    // their parent whole-disk ("disk4") before the check.
+    func refuseInternal(_ target: String) {
+        let parent: String
+        if let r = target.range(of: #"^disk\d+"#, options: .regularExpression) {
+            parent = String(target[r])
+        } else {
+            parent = target
+        }
+        guard let info = DiskInfo.load(parent) else {
+            Emit.error("cannot load \(parent) to verify it is external — refusing")
+            exit(1)
+        }
+        if info.isInternal && opts["force-internal"] != "true" {
+            Emit.error("refusing \(command) on internal disk \(parent) (use --force-internal to override)")
+            exit(1)
+        }
+    }
     switch command {
     case "repartition":
         guard let disk = opts["disk"], let spec = opts["specs"] else { Emit.error("need --disk --specs"); exit(2) }
+        refuseInternal(disk)
         let scheme = opts["scheme"] ?? "GPT"
         finish(Partitions.repartition(disk: disk, scheme: scheme,
                                       specs: spec.split(separator: ";").map(String.init)), "repartition")
     case "format":
         guard let vol = opts["volume"], let fs = opts["fs"] else { Emit.error("need --volume --fs"); exit(2) }
+        refuseInternal(vol)
         finish(Partitions.format(volume: vol, fs: fs, name: opts["name"] ?? "Untitled"), "format")
     case "resize":
         guard let vol = opts["volume"], let size = opts["size"] else { Emit.error("need --volume --size"); exit(2) }
+        refuseInternal(vol)
         let add = (opts["add"] ?? "").isEmpty ? [] : opts["add"]!.split(separator: ";").map(String.init)
         finish(Partitions.resize(volume: vol, size: size, add: add), "resize")
     case "addvolume":
         guard let vol = opts["volume"], let shrink = opts["shrinkto"], let fs = opts["fs"]
         else { Emit.error("need --volume --shrinkto --fs"); exit(2) }
+        refuseInternal(vol)
         finish(Partitions.addVolume(volume: vol, shrinkTo: shrink, fs: fs, name: opts["name"] ?? "Untitled"), "addvolume")
     case "delpart":
         guard let vol = opts["volume"] else { Emit.error("need --volume"); exit(2) }
+        refuseInternal(vol)
         finish(Partitions.delete(volume: vol), "delpart")
     default: break
     }

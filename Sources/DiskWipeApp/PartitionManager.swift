@@ -44,18 +44,25 @@ final class PartitionManager: ObservableObject {
 
     private var enginePath: String { EngineClient.shared.enginePath }
 
+    /// Engine `list` runs on a background task — a synchronous Process spawn
+    /// (~200-500 ms) on the main actor freezes the UI on every hot-plug event.
     func refreshDisks() {
-        guard let arr = EngineClient.shared.array(["list"]) else { return }
-        disks = arr.map { d in
-            DiskItem(id: d["id"] as? String ?? "?", model: d["model"] as? String ?? "?",
-                     serial: d["serial"] as? String ?? "", sizeGB: d["sizeGB"] as? Double ?? 0,
-                     busProtocol: d["busProtocol"] as? String ?? "?", isSSD: d["isSSD"] as? Bool ?? false)
+        Task.detached { [weak self] in
+            let arr = EngineClient.shared.array(["list"]) ?? []
+            await MainActor.run {
+                guard let self else { return }
+                self.disks = arr.map { d in
+                    DiskItem(id: d["id"] as? String ?? "?", model: d["model"] as? String ?? "?",
+                             serial: d["serial"] as? String ?? "", sizeGB: d["sizeGB"] as? Double ?? 0,
+                             busProtocol: d["busProtocol"] as? String ?? "?", isSSD: d["isSSD"] as? Bool ?? false)
+                }
+                // Auto-switch when the previous disk is gone.
+                if self.selectedDisk == nil || !self.disks.contains(where: { $0.id == self.selectedDisk?.id }) {
+                    self.selectedDisk = self.disks.first
+                }
+                self.loadLayout()
+            }
         }
-        // Auto-switch when the previous disk is gone.
-        if selectedDisk == nil || !disks.contains(where: { $0.id == selectedDisk?.id }) {
-            selectedDisk = disks.first
-        }
-        loadLayout()
     }
 
     /// Reset per-disk volatile state when the disk changes (auto or manual).
@@ -78,7 +85,19 @@ final class PartitionManager: ObservableObject {
 
     func loadLayout() {
         guard let disk = selectedDisk else { partitions = []; return }
-        guard let obj = EngineClient.shared.object(["partlist", "--disk", disk.id]) else { return }
+        let diskID = disk.id
+        Task.detached { [weak self] in
+            let obj = EngineClient.shared.object(["partlist", "--disk", diskID])
+            await MainActor.run {
+                guard let self, let obj,
+                      self.selectedDisk?.id == diskID   // user may have switched while we worked
+                else { return }
+                self.applyLayout(obj)
+            }
+        }
+    }
+
+    private func applyLayout(_ obj: [String: Any]) {
         scheme = obj["scheme"] as? String ?? "—"
         let raw = obj["partitions"] as? [[String: Any]] ?? []
         partitions = raw.map { p in
@@ -143,7 +162,11 @@ final class PartitionManager: ObservableObject {
         guard !busy else { return }
         busy = true; lastResult = Loc.shared.t("status.running")
         Task.detached { [weak self] in
-            let r = EngineClient.shared.object(args, sudo: true)
+            // operationTimeout (1 h), NOT the 60 s query default: formatting a
+            // multi-TB volume routinely exceeds a minute, and the watchdog
+            // terminating diskutil mid-write would corrupt the partition table.
+            let r = EngineClient.shared.object(args, sudo: true,
+                                               timeout: EngineClient.operationTimeout)
             _ = self  // keep weak-self semantics
             await MainActor.run {
                 guard let self else { return }

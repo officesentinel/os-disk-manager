@@ -75,12 +75,20 @@ final class EngineClient: @unchecked Sendable {
         return (out, err, exit)
     }
 
+    /// Default watchdog for short queries (list / smart / snapshot / history).
+    static let queryTimeout: TimeInterval = 60
+    /// Watchdog for destructive partition operations. diskutil repartition or
+    /// an ext4 format of a multi-TB disk can run for many minutes; killing the
+    /// engine mid-write would corrupt the partition table. 1 hour ceiling.
+    static let operationTimeout: TimeInterval = 3600
+
     /// Run engine and return the most recent valid JSON object on stdout.
     /// The engine may emit several events; we keep the last parseable line —
     /// engine command results (snapshot, opresult, exported) are always the
     /// final line.
-    func object(_ args: [String], sudo: Bool = false) -> [String: Any]? {
-        let r = runRaw(args, sudo: sudo)
+    func object(_ args: [String], sudo: Bool = false,
+                timeout: TimeInterval = EngineClient.queryTimeout) -> [String: Any]? {
+        let r = runRaw(args, sudo: sudo, timeout: timeout)
         let text = String(data: r.stdout, encoding: .utf8) ?? ""
         for line in text.split(separator: "\n").reversed() {
             if let ld = line.data(using: .utf8),
@@ -92,8 +100,9 @@ final class EngineClient: @unchecked Sendable {
     }
 
     /// Run engine and return its stdout as a JSON array (for `list` / `partlist.partitions`).
-    func array(_ args: [String], sudo: Bool = false) -> [[String: Any]]? {
-        let r = runRaw(args, sudo: sudo)
+    func array(_ args: [String], sudo: Bool = false,
+               timeout: TimeInterval = EngineClient.queryTimeout) -> [[String: Any]]? {
+        let r = runRaw(args, sudo: sudo, timeout: timeout)
         return (try? JSONSerialization.jsonObject(with: r.stdout)) as? [[String: Any]]
     }
 }
